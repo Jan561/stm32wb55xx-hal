@@ -1,0 +1,22 @@
+[package]
+name = "stm32wb55xx_hal"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+rand_core = "0.6"
+sealed = "0.4"
+num_enum = "0.5"
+
+[dependencies.stm32wb]
+features = ["stm32wb55"]
+version = "0.15"
+
+[dependencies.synopsys-usb-otg]
+features = ["cortex-m"]
+version = "0.3.0"
+optional = true
