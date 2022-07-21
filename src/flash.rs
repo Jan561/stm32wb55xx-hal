@@ -576,7 +576,7 @@ impl Drop for OptionsUnlocked<'_, '_> {
 }
 
 impl OptionsUnlocked<'_, '_> {
-    pub fn modify_user_options<F>(&self, op: F) -> Result<(), Error<Status>>
+    pub fn user_options<F>(&self, op: F) -> Result<(), Error<Status>>
     where
         F: for<'w> FnOnce(&UserOptionsR, &'w mut UserOptionsW) -> &'w mut UserOptionsW,
     {
