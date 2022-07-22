@@ -5,7 +5,7 @@ use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 /// Total number of pages, indexed 0 to 255
 pub const NUM_PAGES: usize = 256;
-/// Flash Page Size in Bytes
+/// Flash Page Size in Bytes (4 KiB)
 pub const PAGE_SIZE: usize = 0x0000_1000;
 /// See RM0434 Rev 9 p.75
 pub const FLASH_BASE_ADDR: usize = 0x0800_0000;
@@ -730,65 +730,163 @@ impl OptionsUnlocked<'_, '_> {
             .pcrop1ber
             .modify(|_, w| w.pcrop1b_end().variant(wc._pcrop1b_end()));
     }
+
+    /// Secure flash options (SFR)
+    ///
+    /// This register can only be written to by CPU2.
+    /// This register can be read by both CPUs.
+    pub fn secure_flash_options<F>(&self, op: F)
+    where
+        F: for<'w> FnOnce(
+            &SecureFlashOptionsR,
+            &'w mut SecureFlashOptionsW,
+        ) -> &'w mut SecureFlashOptionsW,
+    {
+        let r = SecureFlashOptionsR::read_from(self.flash.flash);
+        let mut wc = SecureFlashOptionsW(r.0);
+
+        op(&r, &mut wc);
+
+        self.flash.flash.sfr.modify(|_, w| {
+            w.sfsa()
+                .variant(wc._sfsa())
+                .fsd()
+                .bit(wc._fsd())
+                .dds()
+                .bit(wc._dds())
+        });
+    }
+
+    pub fn ipcc<F>(&self, op: F)
+    where
+        F: for<'w> FnOnce(&IpccR, &'w mut IpccW) -> &'w mut IpccW,
+    {
+        let r = IpccR::read_from(self.flash.flash);
+        let mut wc = IpccW(r.0);
+
+        op(&r, &mut wc);
+
+        self.flash
+            .flash
+            .ipccbr
+            .modify(|_, w| w.ipccdba().variant(wc._ipccdba()));
+    }
 }
 
 config_reg_u32! {
     RW, UserOptionsR, UserOptionsW, FLASH, optr, [
-        rdp => (_rdp, RdpLevel, u8, [7:0]),
-        ese => (_ese, bool, bool, [8:8]),
-        bor_level => (_bor_level, BorResetLevel, u8, [11:9]),
-        n_rst_stop => (_n_rst_stop, bool, bool, [12:12]),
-        n_rst_stdby => (_n_rst_stdby, bool, bool, [13:13]),
-        n_rst_shdw => (_n_rst_shdw, bool, bool, [14:14]),
-        idwg_sw => (_idwg_sw, bool, bool, [16:16]),
-        iwdg_stop => (_iwdg_stop, bool, bool, [17:17]),
-        iwdg_stdby => (_iwdg_stdby, bool, bool, [18:18]),
-        wwdg_sw => (_wwdg_sw, bool, bool, [19:19]),
-        n_boot_1 => (_n_boot_1, bool, bool, [23:23]),
-        sram2_pe => (_sram2_pe, bool, bool, [24:24]),
-        sram2_rst => (_sram2_rst, bool, bool, [25:25]),
-        n_swboot_0 => (_n_swboot_0, bool, bool, [26:26]),
-        n_boot_0 => (_n_boot_0, bool, bool, [27:27]),
-        agc_trim => (_agc_trim, u8, u8, [31:29]),
+        rdp => (_rdp, RdpLevel, u8, [7:0], "Read Protection Level"),
+        ese => (_ese, bool, bool, [8:8], "System Security enabled flag"),
+        bor_level => (_bor_level, BorResetLevel, u8, [11:9], "BOR Reset Level"),
+        n_rst_stop => (_n_rst_stop, bool, bool, [12:12], "No Reset in stop mode"),
+        n_rst_stdby => (_n_rst_stdby, bool, bool, [13:13], "No Reset in standby mode"),
+        n_rst_shdw => (_n_rst_shdw, bool, bool, [14:14], "No Reset in shutdown mode"),
+        idwg_sw => (_idwg_sw, bool, bool, [16:16], "Independent watchdog selection\n\n\
+            - `false`: Hardware independent watchdog\n\
+            - `true`: Software independent watchdog
+        "),
+        iwdg_stop => (_iwdg_stop, bool, bool, [17:17], "Independent watchdog counter freeze in stop mode\n\n\
+            - `false`: Independent watchdog counter is frozen in standby mode\n\
+            - `true`: Independent watchdog counter is running in standby mode
+        "),
+        iwdg_stdby => (_iwdg_stdby, bool, bool, [18:18], "Independent watchdog counter freeze in standby mode"),
+        wwdg_sw => (_wwdg_sw, bool, bool, [19:19], "Window watchdog selection\n\n\
+            - `false`: Hardware window watchdog\n\
+            - `true`: Software window watchdog
+        "),
+        n_boot_1 => (_n_boot_1, bool, bool, [23:23], "Boot configuration\n\n\
+            Together with BOOT0 pin or option bit nBOOT0 (depending on nSWBOOT0 option bit configuration), \
+            this bit selects boot mode from the user flash memory, SRAM1 or the System Memory
+        "),
+        sram2_pe => (_sram2_pe, bool, bool, [24:24], "SRAM2 parity check enable"),
+        sram2_rst => (_sram2_rst, bool, bool, [25:25], "SRAM2 and PKA RAM erase when system reset"),
+        n_swboot_0 => (_n_swboot_0, bool, bool, [26:26], "Software BOOT0 selection\n\n\
+            - `false`: BOOT0 taken from the option bit nBOOT0\n\
+            - `true`: BOOT0 taken from the PH3/BOOT0 pin
+        "),
+        n_boot_0 => (_n_boot_0, bool, bool, [27:27], "nBOOT0 option bit"),
+        agc_trim => (_agc_trim, u8, u8, [31:29], "Radio automatic gain control trimming"),
     ]
 }
 
 config_reg_u32! {
     RW, Pcrop1aStrtR, Pcrop1aStrtW, FLASH, pcrop1asr, [
-        pcrop1a_strt => (_pcrop1a_strt, u16, u16, [8:0]),
+        pcrop1a_strt => (_pcrop1a_strt, u16, u16, [8:0], "PCROP1A area start offset\n\n\
+            Unit: Half Page (2 KiB). Size: 9 Bit (0-511)
+        "),
     ]
 }
 
 config_reg_u32! {
     RW, Pcrop1aEndR, Pcrop1aEndW, FLASH, pcrop1aer, [
-        pcrop1a_end => (_pcrop1a_end, u16, u16, [8:0]),
-        pcrop_rdp => (_pcrop_rdp, bool, bool, [31:31]),
+        pcrop1a_end => (_pcrop1a_end, u16, u16, [8:0], "PCROP1A area end offset\n\n\
+            Unit: Half Page (2 KiB). Size: 9 Bit (0-511)
+        "),
+        pcrop_rdp => (_pcrop_rdp, bool, bool, [31:31], "PCROP area preserved when RDP level decreased\n\n\
+            This bit is set only\n\
+            - `false`: PCROP area is not erased when the RDP level is decreased from Level 1 to Level 0\n\
+            - `true`: PCROP area is erased when the RDP level is decreased from Level 1 to Level 0
+        "),
     ]
 }
 
 config_reg_u32! {
     RW, Wrp1AR, Wrp1AW, FLASH, wrp1ar, [
-        wrp1a_strt => (_wrp1a_strt, u8, u8, [7:0]),
-        wrp1a_end => (_wrp1a_end, u8, u8, [23:16]),
+        wrp1a_strt => (_wrp1a_strt, u8, u8, [7:0], "WRP first area 'A' start offset\n\n\
+            Unit: Page (4 KiB). Size: 8 Bit (0-255)
+        "),
+        wrp1a_end => (_wrp1a_end, u8, u8, [23:16], "WRP first area 'A' end offset\n\n\
+            Unit: Page (4 KiB). Size: 8 Bit (0-255)
+        "),
     ]
 }
 
 config_reg_u32! {
     RW, Wrp1BR, Wrp1BW, FLASH, wrp1br, [
-        wrp1b_strt => (_wrp1b_strt, u8, u8, [7:0]),
-        wrp1b_end => (_wrp1b_end, u8, u8, [23:16]),
+        wrp1b_strt => (_wrp1b_strt, u8, u8, [7:0], "WRP second area 'B' start offset\n\n\
+            Unit: Page (4 KiB). Size: 8 Bit (0-255)
+        "),
+        wrp1b_end => (_wrp1b_end, u8, u8, [23:16], "WRP second area 'B' end offset\n\n\
+            Unit: Page (4 KiB). Size: 8 Bit (0-255)
+        "),
     ]
 }
 
 config_reg_u32! {
     RW, Pcrop1bStrtR, Pcrop1bStrtW, FLASH, pcrop1bsr, [
-        pcrop1b_strt => (_pcrop1b_strt, u16, u16, [8:0]),
+        pcrop1b_strt => (_pcrop1b_strt, u16, u16, [8:0], "PCROP1B area start offset\n\n\
+            Unit: Half Page (2 KiB). Size: 9 Bit (0-511)
+        "),
     ]
 }
 
 config_reg_u32! {
     RW, Pcrop1bEndR, Pcrop1bEndW, FLASH, pcrop1ber, [
-        pcrop1b_end => (_pcrop1b_end, u16, u16, [8:0]),
+        pcrop1b_end => (_pcrop1b_end, u16, u16, [8:0], "PCROP1B area end offset\n\n\
+            Unit: Half Page (2 KiB). Size: 9 Bit (0-511)
+        "),
+    ]
+}
+
+config_reg_u32! {
+    RW, SecureFlashOptionsR, SecureFlashOptionsW, FLASH, sfr, [
+        sfsa => (_sfsa, u8, u8, [7:0], "Secure flash memory start address\n\n\
+            Unit: Page (4 KiB). Size: 8 Bit (0-255)
+        "),
+        fsd => (_fsd, bool, bool, [8:8], "Flash memory security disabled\n\n\
+            Start address given by sfsa
+        "),
+        dds => (_dds, bool, bool, [12:12], "Disable CPU2 debug access"),
+    ]
+}
+
+config_reg_u32! {
+    RW, IpccR, IpccW, FLASH, ipccbr, [
+        ipccdba => (_ipccdba, u16, u16, [13:0], "IPCC mailbox data buffer base address offset\n\n\
+            Contains the first double word offset of the IPCC mailbox data buffer area in SRAM2\n\
+            - Unit: Double Word (8 Byte)\n\
+            - Size: 14 Bit
+        ")
     ]
 }
 
@@ -835,7 +933,6 @@ pub enum BorResetLevel {
 fn unlock(flash: &FLASH) {
     /// See RM0434 Rev 9 p. 81
     const WRITE_KEY_1: u32 = 0x4567_0123;
-    /// See RM0434 Rev 9 p. 81
     const WRITE_KEY_2: u32 = 0xCDEF_89AB;
 
     // SAFETY: Passing bits as documented in RM
@@ -849,10 +946,11 @@ fn lock(flash: &FLASH) {
     flash.cr.modify(|_, w| w.lock().set_bit());
 }
 
-const OPTIONS_KEY_1: u32 = 0x0819_2A3B;
-const OPTIONS_KEY_2: u32 = 0x4C5D_6E7F;
-
 fn unlock_options(flash: &FLASH) {
+    // See RM0434 Rev 9 p. 96
+    const OPTIONS_KEY_1: u32 = 0x0819_2A3B;
+    const OPTIONS_KEY_2: u32 = 0x4C5D_6E7F;
+
     flash.optkeyr.write(|w| w.optkeyr().variant(OPTIONS_KEY_1));
     flash.optkeyr.write(|w| w.optkeyr().variant(OPTIONS_KEY_2));
 }

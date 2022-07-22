@@ -36,7 +36,7 @@ macro_rules! get_u32 {
 }
 
 macro_rules! config_reg_u32 {
-    (R, $ident_r:ident, $per:ty, $reg:ident, [$($field:ident => ($ty:ty, $ux:ty, [$hi:tt : $lo:tt])),* $(,)?]) => {
+    (R, $ident_r:ident, $per:ty, $reg:ident, [$($field:ident => ($ty:ty, $ux:ty, [$hi:tt : $lo:tt], $doc:tt)),* $(,)?]) => {
         pub struct $ident_r(u32);
 
         impl $ident_r {
@@ -47,6 +47,7 @@ macro_rules! config_reg_u32 {
             }
 
             $(
+                #[doc=$doc]
                 pub fn $field(&self) -> $ty {
                     mask_u32!(MASK, OFFSET, [$hi:$lo]);
 
@@ -57,7 +58,7 @@ macro_rules! config_reg_u32 {
             )*
         }
     };
-    (W, $ident_w:ident, $per:ty, $reg:ident, [$($field:ident => ($getter:ident, $ty:ty, $ux:ty, [$hi:tt : $lo:tt])),* $(,)?]) => {
+    (W, $ident_w:ident, $per:ty, $reg:ident, [$($field:ident => ($getter:ident, $ty:ty, $ux:ty, [$hi:tt : $lo:tt], $doc:tt)),* $(,)?]) => {
         pub struct $ident_w(u32);
 
         impl $ident_w {
@@ -68,6 +69,7 @@ macro_rules! config_reg_u32 {
             }
 
             $(
+                #[doc=$doc]
                 pub fn $field(&mut self, val: $ty) -> &mut Self {
                     mask_u32!(MASK, OFFSET, [$hi:$lo]);
 
@@ -86,9 +88,9 @@ macro_rules! config_reg_u32 {
             )*
         }
     };
-    (RW, $ident_r:ident, $ident_w:ident, $per:ty, $reg:ident, [$($field:ident => ($getter:ident, $ty:ty, $ux:ty, [$hi:tt : $lo:tt])),* $(,)?]) => {
-        config_reg_u32!(R, $ident_r, $per, $reg, [$($field => ($ty, $ux, [$hi:$lo])),*]);
-        config_reg_u32!(W, $ident_w, $per, $reg, [$($field => ($getter, $ty, $ux, [$hi:$lo])),*]);
+    (RW, $ident_r:ident, $ident_w:ident, $per:ty, $reg:ident, [$($field:ident => ($getter:ident, $ty:ty, $ux:ty, [$hi:tt : $lo:tt], $doc:tt)),* $(,)?]) => {
+        config_reg_u32!(R, $ident_r, $per, $reg, [$($field => ($ty, $ux, [$hi:$lo], $doc)),*]);
+        config_reg_u32!(W, $ident_w, $per, $reg, [$($field => ($getter, $ty, $ux, [$hi:$lo], $doc)),*]);
     };
 }
 
