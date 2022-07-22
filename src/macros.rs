@@ -30,7 +30,7 @@ macro_rules! set_u32 {
 }
 
 macro_rules! get_u32 {
-    ($uxx:ty, $reg:expr, $mask:ident, $offset:ident) => {
+    ($uxx:ty, $reg:expr, $mask:expr, $offset:expr) => {
         crate::macros::R::<$uxx>::r(($reg >> $offset) & $mask)
     };
 }

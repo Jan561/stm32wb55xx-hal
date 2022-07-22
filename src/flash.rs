@@ -757,6 +757,34 @@ impl OptionsUnlocked<'_, '_> {
         });
     }
 
+    pub fn secure_sram2_options<F>(&self, op: F)
+    where
+        F: for<'w> FnOnce(
+            &SecureSRAM2OptionsR,
+            &'w mut SecureSRAM2OptionsW,
+        ) -> &'w mut SecureSRAM2OptionsW,
+    {
+        let r = SecureSRAM2OptionsR::read_from(self.flash.flash);
+        let mut wc = SecureSRAM2OptionsW(r.0);
+
+        op(&r, &mut wc);
+
+        self.flash.flash.srrvr.modify(|_, w| {
+            w.sbrv()
+                .variant(wc._sbrv())
+                .sbrsa()
+                .variant(wc._sbrsa())
+                .brsd()
+                .bit(wc._brsd())
+                .snbrsa()
+                .variant(wc._snbrsa())
+                .nbrsd()
+                .bit(wc._nbrsd())
+                .c2opt()
+                .bit(wc._c2opt())
+        });
+    }
+
     pub fn ipcc<F>(&self, op: F)
     where
         F: for<'w> FnOnce(&IpccR, &'w mut IpccW) -> &'w mut IpccW,
@@ -886,6 +914,36 @@ config_reg_u32! {
             Contains the first double word offset of the IPCC mailbox data buffer area in SRAM2\n\
             - Unit: Double Word (8 Byte)\n\
             - Size: 14 Bit
+        ")
+    ]
+}
+
+config_reg_u32! {
+    RW, SecureSRAM2OptionsR, SecureSRAM2OptionsW, FLASH, srrvr, [
+        sbrv => (_sbrv, u32, u32, [17:0], "CPU2 boot reset vector\n\n\
+            Contains the world aligned CPU2 boot reset start address offset within the selected \
+            memory area by C2OPT
+        "),
+        sbrsa => (_sbrsa, u8, u8, [22:18], "Secure backup SRAM2a start address\n\n\
+            SBRSA contains the start address of the first 1 KiB page of the secure backup SRAM2a area\n\
+            - Size: 5 Bits (0-31)
+        "),
+        brsd => (_brsd, bool, bool, [23:23], "Backup SRAM2a security disable\n\n\
+            - `false`: SRAM2a is secure. SBRSA contains the start address of the first 1 KiB page of the secure backup SRAM2a area\n\
+            - `true`: SRAM2a is not secure
+        "),
+        snbrsa => (_snbrsa, u8, u8, [29:25], "Secure non-backup SRAM2b start address\n\n\
+            SNBRSA contains the start address of the first 1 KiB page of the secure non-backup SRAM2b area
+        "),
+        nbrsd => (_nbrsd, bool, bool, [30:30], "Non-backup security disable\n\n\
+            - `false`: SRAM2b is secure. SNBRSA contains the start address of the first 1 KiB page \
+            of the secure non-backup SRAM2b area\n\
+            - `true`: SRAM2b is not secure
+        "),
+        c2opt => (_c2opt, bool, bool, [31:31], "CPU2 boot reset vector memory selection\n\n\
+            - `false`: SBRV offset addresses SRAM1 or SRAM2, from start address 0x2000_0000 \
+            (SBRV value must be kept within the SRAM area)\n\
+            - `true`: SBRV offset addresses Flash memory, from start address 0x0800_0000
         ")
     ]
 }
