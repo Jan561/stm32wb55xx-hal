@@ -1,6 +1,5 @@
 use crate::pac::FLASH;
 use crate::signature::FlashSize;
-use core::slice;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 /// Total number of pages, indexed 0 to 255
@@ -96,41 +95,13 @@ impl Status2 {
     }
 }
 
-// SAFETY: The implementor must ensure correct implementation of address and len
-pub unsafe trait FlashExt {
-    fn address(&self) -> usize;
-
-    fn len(&self) -> usize;
-
-    fn read(&self) -> &[u8] {
-        let ptr = self.address() as *const _;
-        // SAFETY: Safety constraints upheld by implementor
-        unsafe { slice::from_raw_parts(ptr, self.len()) }
-    }
-
-    fn page(&self, offset: usize) -> Option<u8> {
-        if offset >= self.len() {
-            return None;
-        }
-
-        u8::try_from(offset / PAGE_SIZE).ok()
-    }
-
-    fn uid(&self) -> u64;
+pub trait FlashExt {
+    fn constrain(self) -> Flash;
 }
 
-// SAFETY: For `address` see doc of `FLASH_BASE_ADDR` and `len` is read from the signature
-unsafe impl FlashExt for FLASH {
-    fn address(&self) -> usize {
-        FLASH_BASE_ADDR
-    }
-
-    fn len(&self) -> usize {
-        FlashSize::get().bytes()
-    }
-
-    fn uid(&self) -> u64 {
-        FlashUid::get().uid64()
+impl FlashExt for FLASH {
+    fn constrain(self) -> Flash {
+        Flash { flash: self }
     }
 }
 
@@ -151,19 +122,10 @@ impl Flash {
         FlashSize::get().bytes()
     }
 
-    pub fn read(&self) -> &[u8] {
-        let ptr = self.address() as *const _;
-
-        // SAFETY: See reference of FLASH_BASE_ADDR and FlashSize
-        unsafe { slice::from_raw_parts(ptr, self.len()) }
-    }
-
     pub fn unlock(&mut self) -> UnlockedFlash {
         unlock(&self.flash);
 
-        UnlockedFlash {
-            flash: &mut self.flash,
-        }
+        UnlockedFlash { flash: self }
     }
 
     pub fn page(&self, offset: usize) -> Option<u8> {
@@ -183,15 +145,65 @@ impl Flash {
 
         self.flash.cr.modify(|_, w| w.obl_launch().set_bit());
     }
+
+    pub fn acr<F>(&self, op: F)
+    where
+        F: for<'w> FnOnce(&AcrR, &'w mut AcrW) -> &'w mut AcrW,
+    {
+        let r = AcrR::read_from(&self.flash);
+        let mut wc = AcrW(r.0);
+
+        op(&r, &mut wc);
+
+        self.flash.acr.modify(|_, w| {
+            w.latency()
+                .variant(wc._latency())
+                .prften()
+                .bit(wc._prften())
+                .icen()
+                .bit(wc._icen())
+                .icrst()
+                .bit(wc._icrst())
+                .dcen()
+                .bit(wc._dcen())
+                .dcrst()
+                .bit(wc._dcrst())
+                .pes()
+                .bit(wc._pes())
+                .empty()
+                .bit(wc._empty())
+        });
+    }
+
+    pub fn acr_2<F>(&self, op: F)
+    where
+        F: for<'w> FnOnce(&Acr2R, &'w mut Acr2W) -> &'w mut Acr2W,
+    {
+        let r = Acr2R::read_from(&self.flash);
+        let mut wc = Acr2W(r.0);
+
+        op(&r, &mut wc);
+
+        self.flash.c2acr.modify(|_, w| {
+            w.prften()
+                .bit(wc._prfen())
+                .icen()
+                .bit(wc._icen())
+                .icrst()
+                .bit(wc._icrst())
+                .pes()
+                .bit(wc._pes())
+        })
+    }
 }
 
 pub struct UnlockedFlash<'a> {
-    flash: &'a mut FLASH,
+    flash: &'a mut Flash,
 }
 
 impl Drop for UnlockedFlash<'_> {
     fn drop(&mut self) {
-        lock(self.flash);
+        lock(&self.flash.flash);
     }
 }
 
@@ -200,15 +212,15 @@ macro_rules! page_erase {
     ($name:ident, $sr:ident, $cr:ident, $status:ident, $cisr:ident, $doc:tt) => {
         #[doc=$doc]
         pub unsafe fn $name(&mut self, page: u8) -> Result<(), Error<$status>> {
-            while self.flash.$sr.read().bsy().bit_is_set() {}
+            while self.reg().$sr.read().bsy().bit_is_set() {}
 
-            if self.flash.$sr.read().pesd().bit_is_set() {
+            if self.reg().$sr.read().pesd().bit_is_set() {
                 return Err(Error::OperationSuspended);
             }
 
             self.$cisr();
 
-            self.flash.$cr.modify(|_, w| {
+            self.reg().$cr.modify(|_, w| {
                 w
                     // Set page number
                     .pnb()
@@ -230,7 +242,7 @@ macro_rules! page_erase {
                     .set_bit()
             });
 
-            while self.flash.$sr.read().bsy().bit_is_set() {}
+            while self.reg().$sr.read().bsy().bit_is_set() {}
 
             Ok(())
         }
@@ -248,7 +260,7 @@ macro_rules! program {
 
             self.$cisr();
 
-            self.flash.$cr.modify(|_, w| {
+            self.reg().$cr.modify(|_, w| {
                 w
                     // Programming Mode
                     .pg()
@@ -264,7 +276,7 @@ macro_rules! program {
                     .clear_bit()
             });
 
-            let mut ptr = self.flash.address() as *mut u32;
+            let mut ptr = self.address() as *mut u32;
             // SAFETY: offset is in bounds of flash
             // offset / 4 bytes
             ptr = unsafe { ptr.add(offset >> 2) };
@@ -281,18 +293,18 @@ macro_rules! program {
                     ptr = ptr.add(1);
                 }
 
-                while self.flash.$sr.read().bsy().bit_is_set() {}
+                while self.reg().$sr.read().bsy().bit_is_set() {}
 
-                if self.flash.$sr.read().eop().bit_is_set() {
-                    self.flash.$sr.modify(|_, w| w.eop().clear_bit());
+                if self.reg().$sr.read().eop().bit_is_set() {
+                    self.reg().$sr.modify(|_, w| w.eop().clear_bit());
                 } else {
                     return Err(Error::Status($status {
-                        r: self.flash.$sr.read(),
+                        r: self.reg().$sr.read(),
                     }));
                 }
             }
 
-            self.flash.$cr.modify(|_, w| w.pg().clear_bit());
+            self.reg().$cr.modify(|_, w| w.pg().clear_bit());
 
             Ok(())
         }
@@ -302,7 +314,7 @@ macro_rules! program {
 macro_rules! clear_sr {
     ($name:ident, $sr:ident, $misserr:ident) => {
         fn $name(&self) {
-            self.flash.$sr.modify(|_, w| {
+            self.reg().$sr.modify(|_, w| {
                 w.eop()
                     .set_bit()
                     .fasterr()
@@ -329,6 +341,14 @@ macro_rules! clear_sr {
 }
 
 impl<'a> UnlockedFlash<'a> {
+    fn reg(&self) -> &FLASH {
+        &self.flash.flash
+    }
+
+    fn address(&self) -> usize {
+        self.flash.address()
+    }
+
     page_erase!(
         page_erase_1,
         sr,
@@ -362,11 +382,11 @@ impl<'a> UnlockedFlash<'a> {
     //
     // See RM0434 Rev 9 p. 83
     pub unsafe fn mass_erase(&mut self) -> Result<(), Error<Status2>> {
-        while self.flash.c2sr.read().bsy().bit_is_set() {}
+        while self.flash.flash.c2sr.read().bsy().bit_is_set() {}
 
         self.clear_sr_2();
 
-        self.flash.c2cr.modify(|_, w| {
+        self.flash.flash.c2cr.modify(|_, w| {
             w
                 // Mass Erase
                 .mer()
@@ -385,7 +405,7 @@ impl<'a> UnlockedFlash<'a> {
                 .set_bit()
         });
 
-        while self.flash.c2sr.read().bsy().bit_is_set() {}
+        while self.flash.flash.c2sr.read().bsy().bit_is_set() {}
 
         Ok(())
     }
@@ -436,11 +456,11 @@ impl<'a> UnlockedFlash<'a> {
 
         self.mass_erase()?;
 
-        while self.flash.c2sr.read().bsy().bit_is_set() {}
+        while self.flash.flash.c2sr.read().bsy().bit_is_set() {}
 
         self.clear_sr_2();
 
-        self.flash.c2cr.modify(|_, w| {
+        self.flash.flash.c2cr.modify(|_, w| {
             w
                 // Fast Programming
                 .fstpg()
@@ -469,24 +489,24 @@ impl<'a> UnlockedFlash<'a> {
                 ptr = ptr.add(1);
             }
 
-            while self.flash.c2sr.read().bsy().bit_is_set() {}
+            while self.flash.flash.c2sr.read().bsy().bit_is_set() {}
 
-            if self.flash.c2sr.read().eop().bit_is_set() {
-                self.flash.c2sr.modify(|_, w| w.eop().clear_bit());
+            if self.flash.flash.c2sr.read().eop().bit_is_set() {
+                self.flash.flash.c2sr.modify(|_, w| w.eop().clear_bit());
             } else {
                 return Err(Error::Status(Status2 {
-                    r: self.flash.c2sr.read(),
+                    r: self.flash.flash.c2sr.read(),
                 }));
             }
         }
 
-        self.flash.c2cr.modify(|_, w| w.fstpg().clear_bit());
+        self.flash.flash.c2cr.modify(|_, w| w.fstpg().clear_bit());
 
         Ok(())
     }
 
     pub fn options_unlocked(&mut self) -> OptionsUnlocked<'_, 'a> {
-        unlock_options(&self.flash);
+        unlock_options(&self.flash.flash);
 
         OptionsUnlocked { flash: self }
     }
@@ -502,21 +522,25 @@ pub struct OptionsUnlocked<'a, 'b> {
 
 impl Drop for OptionsUnlocked<'_, '_> {
     fn drop(&mut self) {
-        lock_options(self.flash.flash);
+        lock_options(&self.flash.flash.flash);
     }
 }
 
 impl OptionsUnlocked<'_, '_> {
+    fn reg(&self) -> &FLASH {
+        self.flash.reg()
+    }
+
     pub fn user_options<F>(&self, op: F) -> Result<(), Error<Status>>
     where
         F: for<'w> FnOnce(&UserOptionsR, &'w mut UserOptionsW) -> &'w mut UserOptionsW,
     {
-        let r = UserOptionsR::read_from(self.flash.flash);
+        let r = UserOptionsR::read_from(self.reg());
         let mut wc = UserOptionsW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash.flash.optr.modify(|_, w| {
+        self.reg().optr.modify(|_, w| {
             w.rdp()
                 .variant(wc._rdp())
                 .ese()
@@ -551,17 +575,15 @@ impl OptionsUnlocked<'_, '_> {
                 .variant(wc._agc_trim())
         });
 
-        while self.flash.flash.sr.read().bsy().bit_is_set() {}
+        while self.reg().sr.read().bsy().bit_is_set() {}
 
-        if self.flash.flash.sr.read().pesd().bit_is_set()
-            || self.flash.flash.c2sr.read().pesd().bit_is_set()
-        {
+        if self.reg().sr.read().pesd().bit_is_set() || self.reg().c2sr.read().pesd().bit_is_set() {
             return Err(Error::OperationSuspended);
         }
 
-        self.flash.flash.cr.modify(|_, w| w.optstrt().set_bit());
+        self.reg().cr.modify(|_, w| w.optstrt().set_bit());
 
-        while self.flash.flash.sr.read().bsy().bit_is_set() {}
+        while self.reg().sr.read().bsy().bit_is_set() {}
 
         Ok(())
     }
@@ -570,13 +592,12 @@ impl OptionsUnlocked<'_, '_> {
     where
         F: for<'w> FnOnce(&Pcrop1aStrtR, &'w mut Pcrop1aStrtW) -> &'w mut Pcrop1aStrtW,
     {
-        let r = Pcrop1aStrtR::read_from(self.flash.flash);
+        let r = Pcrop1aStrtR::read_from(self.reg());
         let mut wc = Pcrop1aStrtW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash
-            .flash
+        self.reg()
             .pcrop1asr
             .modify(|_, w| w.pcrop1a_strt().variant(wc._pcrop1a_strt()));
     }
@@ -585,12 +606,12 @@ impl OptionsUnlocked<'_, '_> {
     where
         F: for<'w> FnOnce(&Pcrop1aEndR, &'w mut Pcrop1aEndW) -> &'w mut Pcrop1aEndW,
     {
-        let r = Pcrop1aEndR::read_from(self.flash.flash);
+        let r = Pcrop1aEndR::read_from(self.reg());
         let mut wc = Pcrop1aEndW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash.flash.pcrop1aer.modify(|_, w| {
+        self.reg().pcrop1aer.modify(|_, w| {
             w.pcrop1a_end()
                 .variant(wc._pcrop1a_end())
                 .pcrop_rdp()
@@ -602,12 +623,12 @@ impl OptionsUnlocked<'_, '_> {
     where
         F: for<'w> FnOnce(&Wrp1AR, &'w mut Wrp1AW) -> &'w mut Wrp1AW,
     {
-        let r = Wrp1AR::read_from(self.flash.flash);
+        let r = Wrp1AR::read_from(self.reg());
         let mut wc = Wrp1AW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash.flash.wrp1ar.modify(|_, w| {
+        self.reg().wrp1ar.modify(|_, w| {
             w.wrp1a_strt()
                 .variant(wc._wrp1a_strt())
                 .wrp1a_end()
@@ -619,12 +640,12 @@ impl OptionsUnlocked<'_, '_> {
     where
         F: for<'w> FnOnce(&Wrp1BR, &'w mut Wrp1BW) -> &'w mut Wrp1BW,
     {
-        let r = Wrp1BR::read_from(self.flash.flash);
+        let r = Wrp1BR::read_from(self.reg());
         let mut wc = Wrp1BW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash.flash.wrp1br.modify(|_, w| {
+        self.reg().wrp1br.modify(|_, w| {
             w.wrp1b_strt()
                 .variant(wc._wrp1b_strt())
                 .wrp1b_end()
@@ -636,13 +657,12 @@ impl OptionsUnlocked<'_, '_> {
     where
         F: for<'w> FnOnce(&Pcrop1bStrtR, &'w mut Pcrop1bStrtW) -> &'w mut Pcrop1bStrtW,
     {
-        let r = Pcrop1bStrtR::read_from(self.flash.flash);
+        let r = Pcrop1bStrtR::read_from(self.reg());
         let mut wc = Pcrop1bStrtW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash
-            .flash
+        self.reg()
             .pcrop1bsr
             .modify(|_, w| w.pcrop1b_strt().variant(wc._pcrop1b_strt()));
     }
@@ -651,13 +671,12 @@ impl OptionsUnlocked<'_, '_> {
     where
         F: for<'w> FnOnce(&Pcrop1bEndR, &'w mut Pcrop1bEndW) -> &'w mut Pcrop1bEndW,
     {
-        let r = Pcrop1bEndR::read_from(self.flash.flash);
+        let r = Pcrop1bEndR::read_from(self.reg());
         let mut wc = Pcrop1bEndW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash
-            .flash
+        self.reg()
             .pcrop1ber
             .modify(|_, w| w.pcrop1b_end().variant(wc._pcrop1b_end()));
     }
@@ -673,19 +692,21 @@ impl OptionsUnlocked<'_, '_> {
             &'w mut SecureFlashOptionsW,
         ) -> &'w mut SecureFlashOptionsW,
     {
-        let r = SecureFlashOptionsR::read_from(self.flash.flash);
+        let r = SecureFlashOptionsR::read_from(self.reg());
         let mut wc = SecureFlashOptionsW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash.flash.sfr.modify(|_, w| {
-            w.sfsa()
-                .variant(wc._sfsa())
-                .fsd()
-                .bit(wc._fsd())
-                .dds()
-                .bit(wc._dds())
-        });
+        if r.0 != wc.0 {
+            self.reg().sfr.modify(|_, w| {
+                w.sfsa()
+                    .variant(wc._sfsa())
+                    .fsd()
+                    .bit(wc._fsd())
+                    .dds()
+                    .bit(wc._dds())
+            });
+        }
     }
 
     pub fn secure_sram2_options<F>(&self, op: F)
@@ -695,41 +716,105 @@ impl OptionsUnlocked<'_, '_> {
             &'w mut SecureSRAM2OptionsW,
         ) -> &'w mut SecureSRAM2OptionsW,
     {
-        let r = SecureSRAM2OptionsR::read_from(self.flash.flash);
+        let r = SecureSRAM2OptionsR::read_from(self.reg());
         let mut wc = SecureSRAM2OptionsW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash.flash.srrvr.modify(|_, w| {
-            w.sbrv()
-                .variant(wc._sbrv())
-                .sbrsa()
-                .variant(wc._sbrsa())
-                .brsd()
-                .bit(wc._brsd())
-                .snbrsa()
-                .variant(wc._snbrsa())
-                .nbrsd()
-                .bit(wc._nbrsd())
-                .c2opt()
-                .bit(wc._c2opt())
-        });
+        if r.0 != wc.0 {
+            self.reg().srrvr.modify(|_, w| {
+                w.sbrv()
+                    .variant(wc._sbrv())
+                    .sbrsa()
+                    .variant(wc._sbrsa())
+                    .brsd()
+                    .bit(wc._brsd())
+                    .snbrsa()
+                    .variant(wc._snbrsa())
+                    .nbrsd()
+                    .bit(wc._nbrsd())
+                    .c2opt()
+                    .bit(wc._c2opt())
+            });
+        }
     }
 
     pub fn ipcc<F>(&self, op: F)
     where
         F: for<'w> FnOnce(&IpccR, &'w mut IpccW) -> &'w mut IpccW,
     {
-        let r = IpccR::read_from(self.flash.flash);
+        let r = IpccR::read_from(self.reg());
         let mut wc = IpccW(r.0);
 
         op(&r, &mut wc);
 
-        self.flash
-            .flash
+        self.reg()
             .ipccbr
             .modify(|_, w| w.ipccdba().variant(wc._ipccdba()));
     }
+}
+
+config_reg_u32! {
+    RW, AcrR, AcrW, FLASH, acr, [
+        latency => (_latency, Latency, u8, [2:0], "Latency\n\n\
+            Represents the ratio of the flash memory HCLK clock period to the flash memory access time
+        "),
+        prften => (_prften, bool, bool, [8:8], "CPU1 Prefetch enable\n\n\
+            - `false`: CPU1 prefetch disabled\n\
+            - `true`: CPU1 prefetch enabled
+        "),
+        icen => (_icen, bool, bool, [9:9], "CPU1 Instruction cache enable\n\n\
+            - `false`: CPU1 instruction cache disabled\n\
+            - `true`: CPU1 instruction cache enabled
+        "),
+        dcen => (_dcen, bool, bool, [10:10], "CPU1 data cache enable\n\n\
+            - `false`: CPU1 data cache is disabled\n\
+            - `true`: CPU1 data cache is enabled
+        "),
+        icrst => (_icrst, bool, bool, [11:11], "CPU1 instruction cache reset\n\n\
+            This bit can be written only if the instruction cache is disabled\n\
+            - `false`: CPU1 instruction cache is not reset\n\
+            - `true`: CPU1 instruction cache is reset
+        "),
+        dcrst => (_dcrst, bool, bool, [12:12], "CPU1 data cache reset\n\n\
+            This bit can be written only if the data cache is disabled\n\
+            - `false`: CPU1 data cache is not reset\n\
+            - `true`: CPU1 data cache is reset
+        "),
+        pes => (_pes, bool, bool, [15:15], "CPU1 Program / erase suspend request\n\n\
+            - `false`: Flash memory program and erase operations granted\n\
+            - `true`: New flash memory program and erase operations suspended until this
+            bit and the same bit for CPU2 is cleared
+        "),
+        empty => (_empty, bool, bool, [16:16], "CPU1 Flash memory user area empty\n\n\
+            When read indicates whether the first location of the User Flash memory is erased or has a 
+programmed value\n\
+            - `false`: User flash memory programmed\n\
+            - `true`: User flash memory empty
+        "),
+    ]
+}
+
+config_reg_u32! {
+    RW, Acr2R, Acr2W, FLASH, c2acr, [
+        prfen => (_prfen, bool, bool, [8:8], "CPU2 prefetch enable\n\n\
+            - `false`: CPU2 prefetch disabled\n\
+            - `true`: CPU2 prefetch enabled
+        "),
+        icen => (_icen, bool, bool, [9:9], "CPU2 instruction cache enable\n\n\
+            - `false`: CPU2 instruction cache disabled\n\
+            - `true`: CPU2 instruction cache enabled
+        "),
+        icrst => (_icrst, bool, bool, [11:11], "CPU2 instruction cache reset\n\n\
+            - `false`: CPU2 instruction cache is not reset\n\
+            - `true`: CPU2 instruction cache is reset
+        "),
+        pes => (_pes, bool, bool, [15:15], "CPU2 program / erase suspend request\n\n\
+            - `false`: Flash memory program and erase operations granted\n\
+            - `true`: New flash memory program and erase operations suspended until this
+            bit and the same bit for CPU1 is cleared
+        "),
+    ]
 }
 
 config_reg_u32! {
@@ -875,8 +960,46 @@ config_reg_u32! {
             - `false`: SBRV offset addresses SRAM1 or SRAM2, from start address 0x2000_0000 \
             (SBRV value must be kept within the SRAM area)\n\
             - `true`: SBRV offset addresses Flash memory, from start address 0x0800_0000
-        ")
+        "),
     ]
+}
+
+/// Latency
+///
+/// Represents the ratio of the flash memory HCLK clock period to the flash memory access time
+///
+/// # Note
+///
+/// The chip has two power modes, selectable via power control (PWR):
+/// - Range 1: High-performance range / overvolted, f <= 64 MHz
+/// - Range 2: Low-power range / undervolted, f <= 16 MHz
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum Latency {
+    /// Zero wait states
+    ///
+    /// Apply, when:
+    /// - Range 1: f <= 18 MHz
+    /// - Range 2: f <= 6 MHz
+    W0 = 0b000,
+    /// One wait state
+    ///
+    /// Apply, when:
+    /// - Range 1: f <= 36 MHz
+    /// - Range 2: f <= 12 MHz
+    W1 = 0b001,
+    /// Two wait states
+    ///
+    /// Apply, when:
+    /// - Range 1: f <= 54 MHz
+    /// - Range 2: f <= 16 MHz
+    W2 = 0b010,
+    /// Three wait states
+    ///
+    /// Apply, when:
+    /// - Range 1: f <= 64 MHz
+    /// - Range 2: N/A
+    W3 = 0b011,
 }
 
 /// Read Protection
