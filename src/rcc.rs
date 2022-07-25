@@ -1,4 +1,5 @@
-use crate::{pac::RCC, pwr::Vos};
+use crate::pac::RCC;
+use crate::pwr::Vos;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use sealed::sealed;
 
