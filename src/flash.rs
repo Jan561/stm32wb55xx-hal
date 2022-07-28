@@ -1023,6 +1023,7 @@ pub enum RdpLevel {
     /// - Only a custom boot loader will be able to access the flash main memory
     /// - *This can't be undone.* If you need to disable RDP in the future,
     /// you need to physically replace the MCU. Not even ST can help you with that
+    #[cfg(feature = "rdp_lv_2")]
     L2 = 0xCC,
 }
 
