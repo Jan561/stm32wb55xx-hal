@@ -2,7 +2,7 @@ MEMORY
 {
   FLASH : ORIGIN = 0x08000000, LENGTH = 1M
   /* SRAM1, SRAM2a, SRAM2b  */
-  RAM : ORIGIN = 0x20000000, LENGTH = 256K
+  RAM : ORIGIN = 0x20000000, LENGTH = 128K
 }
 
 /* This is where the call stack will be allocated. */

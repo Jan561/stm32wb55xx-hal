@@ -1,5 +1,5 @@
-use crate::{pac::RCC, flash::Flash};
 use crate::pwr::Vos;
+use crate::{flash::Flash, pac::RCC};
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use sealed::sealed;
 
@@ -18,9 +18,7 @@ pub trait RccExt {
 
 impl RccExt for RCC {
     fn constrain(self) -> Rcc {
-        Rcc {
-            rcc: self,
-        }
+        Rcc { rcc: self }
     }
 }
 
@@ -53,7 +51,7 @@ pub struct Rcc {
 
 impl Rcc {
     /// # Arguments
-    /// 
+    ///
     /// - `op`: Closure with 2 arguments r and w
     /// - `flash`: Needed when increasing or decreasing CPU frequency.
     /// If not provided in this case, the method will panic
@@ -78,7 +76,6 @@ impl Rcc {
 
         if current_sysclk > new_sysclk {
             // Decrease CPU frequency
-            
         } else if current_sysclk < new_sysclk {
             // Increase CPU frequency
         }
@@ -102,14 +99,9 @@ impl Rcc {
     }
 
     pub fn sysclk_hertz(cfgr_r: &CfgrR, cr_r: &CrR, pllcfgr: &PllCfgrR) -> u32 {
-
         match cfgr_r.sws() {
-            SysclkSwitch::Msi => {
-                Self::msi_hertz(cr_r)
-            }
-            SysclkSwitch::Hsi16 => {
-                hsi16_hertz()
-            }
+            SysclkSwitch::Msi => Self::msi_hertz(cr_r),
+            SysclkSwitch::Hsi16 => hsi16_hertz(),
             SysclkSwitch::Hse => {
                 if cr_r.hsepre() {
                     hse_hertz() / 2
@@ -442,7 +434,7 @@ pub enum PllSrc {
 }
 
 /// Division factor for the main PLL and audio PLLSAI1 input clock
-/// 
+///
 /// The software has to set these bits to ensure that the VCO input frequency
 /// ranges from 2.66 to 16 MHz
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
@@ -517,12 +509,12 @@ pub struct Pllp(u8);
 
 impl Pllp {
     /// Main PLL division factor for PLLCLK
-    /// 
+    ///
     /// Note: The software has to set these bits so that 64 MHz is not exceeded on
     /// this domain
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// - `x`: Desired division factor. Must be in range of [2, 32]
     pub fn new(x: u8) -> Result<Self, ValueError> {
         if x < 2 || x > 32 {
