@@ -14,6 +14,7 @@ pub enum Error {
     SmpsMsiUnsupportedRange,
     PllEnabled,
     SelectedClockNotEnabled,
+    ClockInUse,
 }
 
 macro_rules! value_error {
@@ -64,6 +65,56 @@ pub struct Rcc {
 }
 
 impl Rcc {
+    pub fn cr<F>(&mut self, op: F) -> Result<(), Error>
+    where
+        F: for<'w> FnOnce(&CrR, &'w mut CrW) -> &'w mut CrW,
+    {
+        let r = CrR::read_from(&self.rcc);
+        let mut wc = CrW(r.0);
+
+        op(&r, &mut wc);
+
+        let cfgr = self.cfg_read();
+        let pllcfgr = self.pllcfgr_read();
+
+        // MSI
+
+        // Check if clock shall be disabled but is currently used by sysclk or pll
+        if !wc._msion()
+            && (cfgr.sws() == SysclkSwitch::Msi || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Msi))
+        {
+            return Err(Error::ClockInUse);
+        }
+
+        // HSI16
+
+        // Check if clock shall be disabled but is currently used by sysclk or pll
+        if !wc._hsion()
+            && (cfgr.sws() == SysclkSwitch::Hsi16
+                || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Hsi16))
+        {
+            return Err(Error::ClockInUse);
+        }
+
+        // HSE
+
+        // Check if clock shall be disabled but is currently used by sysclk or pll
+        if !wc._hseon()
+            && (cfgr.sws() == SysclkSwitch::Hse || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Hse))
+        {
+            return Err(Error::ClockInUse);
+        }
+
+        // PLL
+
+        // Check if clock shall be disabled but is currently used by sysclk
+        if !wc._pllon() && cfgr.sws() == SysclkSwitch::Pll {
+            return Err(Error::ClockInUse);
+        }
+
+        Ok(())
+    }
+
     pub fn cr_read(&self) -> CrR {
         CrR::read_from(&self.rcc)
     }
