@@ -44,11 +44,15 @@
 //!
 //! Note: Stop, Standby and Shutdown Modes are only entered, when both CPUs are in CStop mode
 
+pub mod pxcr;
+
 use crate::pac::pwr::{sr1, sr2};
 use crate::pac::PWR;
 use crate::rcc::Sysclk;
 use cortex_m::peripheral::SCB;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
+
+use self::pxcr::Pxcr;
 
 #[derive(Debug)]
 pub enum Error {
@@ -72,6 +76,10 @@ pub struct Pwr {
 }
 
 impl Pwr {
+    pub fn pxcr(&self) -> Pxcr {
+        Pxcr(self)
+    }
+
     #[cfg(feature = "cm4")]
     pub fn set_power_range(&self, range: Vos, sysclk: impl Sysclk) -> Result<(), Error> {
         if range == Vos::Range2 && sysclk.current_hertz() > 2_000_000 {

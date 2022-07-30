@@ -83,28 +83,6 @@ impl Status {
     }
 }
 
-pub struct Status2 {
-    r: crate::pac::flash::c2sr::R,
-}
-
-impl Status2 {
-    /// Status register
-    pub fn r(&self) -> &crate::pac::flash::c2sr::R {
-        &self.r
-    }
-
-    /// Programming Error occured
-    pub fn prog_err(&self) -> bool {
-        self.r.sizerr().bit_is_set()
-            || self.r.misserr().bit_is_set()
-            || self.r.fasterr().bit_is_set()
-            || self.r.wrperr().bit_is_set()
-            || self.r.pgaerr().bit_is_set()
-            || self.r.pgserr().bit_is_set()
-            || self.r.progerr().bit_is_set()
-    }
-}
-
 pub trait FlashExt {
     fn constrain(self) -> Flash;
 }
