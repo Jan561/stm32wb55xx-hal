@@ -80,13 +80,19 @@ impl Pwr {
         Pxcr(self)
     }
 
-    #[cfg(feature = "cm4")]
-    pub fn set_power_range(&self, range: Vos, sysclk: impl Sysclk) -> Result<(), Error> {
-        if range == Vos::Range2 && sysclk.current_hertz() > 2_000_000 {
+    // See RM0434 Rev 10 p. 146
+    pub fn set_power_range(&self, range: Vos, sysclk: u32) -> Result<(), Error> {
+        if range == Vos::Range2 && sysclk > 2_000_000 {
             return Err(Error::SysclkTooHighVos);
         }
 
+        let old_vos: Vos = self.pwr.cr1.read().vos().bits().try_into().unwrap();
+
         self.pwr.cr1.modify(|_, w| w.vos().variant(range.into()));
+
+        if old_vos == Vos::Range2 && range == Vos::Range1 {
+            while self.pwr.sr2.read().vosf().bit_is_set() {}
+        }
 
         Ok(())
     }
@@ -159,12 +165,9 @@ impl Pwr {
 
     /// Exit low power run mode
     pub fn exit_low_power_run(&self) {
-        let cr1 = &c1_c2!(self.pwr.cr1, self.pwr.c2cr1);
-        let sr2 = &c1_c2!(self.pwr.sr2, self.pwr.c2sr2);
+        self.pwr.cr1.modify(|_, w| w.lpr().clear_bit());
 
-        cr1.modify(|_, w| w.lpr().clear_bit());
-
-        while sr2.read().reglpf().bit_is_set() {}
+        while self.pwr.sr2.read().reglpf().bit_is_set() {}
     }
 
     /// Enter low power mode
@@ -173,7 +176,7 @@ impl Pwr {
     pub fn enter_low_power_mode(&self, mode: Lpms, scb: &mut SCB) -> Result<(), Error> {
         let cr1 = &c1_c2!(self.pwr.cr1, self.pwr.c2cr1);
 
-        if cr1.read().lpr().bit_is_set() && mode == Lpms::Stop2 {
+        if self.pwr.cr1.read().lpr().bit_is_set() && mode == Lpms::Stop2 {
             return Err(Error::LPRunToStop2Illegal);
         }
 
@@ -190,7 +193,7 @@ impl Pwr {
     pub fn enter_low_power_mode_sleeponexit(&self, mode: Lpms, scb: &mut SCB) -> Result<(), Error> {
         let cr1 = &c1_c2!(self.pwr.cr1, self.pwr.c2cr1);
 
-        if cr1.read().lpr().bit_is_set() && mode == Lpms::Stop2 {
+        if self.pwr.cr1.read().lpr().bit_is_set() && mode == Lpms::Stop2 {
             return Err(Error::LPRunToStop2Illegal);
         }
 
@@ -235,11 +238,16 @@ impl Pwr {
     }
 
     #[cfg(feature = "cm0p")]
+    pub fn shared_cr1_read(&self) -> SharedCr1R {
+        SharedCr1R::read_from(&self.pwr)
+    }
+
+    #[cfg(feature = "cm0p")]
     pub fn cr1<F>(&self, op: F)
     where
         F: for<'w> FnOnce(&Cr1R, &'w mut Cr1W) -> &'w mut Cr1W,
     {
-        let r = Cr1R::read_from(&self.pwr.c2cr1);
+        let r = Cr1R::read_from(&self.pwr);
         let mut wc = Cr1W(r.0);
 
         op(&r, &mut wc);
@@ -479,7 +487,7 @@ config_reg_u32! {
 
 #[cfg(feature = "cm0p")]
 config_reg_u32! {
-    R, Cr1R, PWR, cr1, [
+    R, Cr1R, PWR, c2cr1, [
         lpms => (Lpms, u8, [2:0], "Low-Power mode selection"),
         fpdr => (bool, bool, [4:4], "Flash memory power down mode during LPRun for CPUx\n\n\
             Selects whether the flash memory is in power down mode or idle mode when in LPRun mode. (flash memory
@@ -509,15 +517,13 @@ config_reg_u32! {
 
 #[cfg(feature = "cm0p")]
 config_reg_u32! {
-    W, Cr1W, PWR, c2cr1, [
-        bleewkup => (_bleewkup, bool, bool, [14:14], "BLE external wakeup\n\n\
-            When set this bit forces a wakeup of the BLE controller. It is automatically reset\n\
-            when BLE controller exits its sleep mode
+    R, SharedCr1R, PWR, cr1, [
+        dbp => (bool, bool, [8:8], "Disable backup domain write protection\n\n\
+            In reset state, the RTC and backup registers are protected against parasitic write access.
+            This bit must be set to enable write access to these registers
         "),
-        _802ewkup => (__802ewkup, bool, bool, [15:15], "802.15.4 external wakeup signal\n\n\
-            When set this bit forces a wakeup of the 802.15.4 controller. It is automatically reset\n\
-            when 802.15.4 controller exits its sleep mode
-        "),
+        vos => (Vos, u8, [10:9], "Voltage scaling range selection"),
+        lpr => (bool, bool, [15:15], "Low-power run"),
     ]
 }
 
@@ -528,7 +534,7 @@ config_reg_u32! {
             When set this bit forces a wakeup of the BLE controller. It is automatically reset\n\
             when BLE controller exits its sleep mode
         "),
-        i802ewkup => (_802ewkup, bool, bool, [15:15], "802.15.4 external wakeup signal\n\n\
+        _802ewkup => (__802ewkup, bool, bool, [15:15], "802.15.4 external wakeup signal\n\n\
             When set this bit forces a wakeup of the 802.15.4 controller. It is automatically reset\n\
             when 802.15.4 controller exits its sleep mode
         "),

@@ -74,7 +74,7 @@ impl Status {
     /// Programming Error occured
     pub fn prog_err(&self) -> bool {
         self.r.sizerr().bit_is_set()
-            || self.r.miserr().bit_is_set()
+            || c1_c2!(self.r.miserr().bit_is_set(), self.r.misserr().bit_is_set())
             || self.r.fasterr().bit_is_set()
             || self.r.wrperr().bit_is_set()
             || self.r.pgaerr().bit_is_set()
