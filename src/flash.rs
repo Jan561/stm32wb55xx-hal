@@ -143,10 +143,9 @@ impl Flash {
 
         op(&r, &mut wc);
 
+        #[cfg(feature = "cm4")]
         self.flash.acr.modify(|_, w| {
-            w.latency()
-                .variant(wc._latency())
-                .prften()
+            w.prften()
                 .bit(wc._prften())
                 .icen()
                 .bit(wc._icen())
@@ -161,17 +160,8 @@ impl Flash {
                 .empty()
                 .bit(wc._empty())
         });
-    }
 
-    pub fn acr_2<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Acr2R, &'w mut Acr2W) -> &'w mut Acr2W,
-    {
-        let r = Acr2R::read_from(&self.flash);
-        let mut wc = Acr2W(r.0);
-
-        op(&r, &mut wc);
-
+        #[cfg(feature = "cm0p")]
         self.flash.c2acr.modify(|_, w| {
             w.prften()
                 .bit(wc._prfen())
@@ -181,7 +171,12 @@ impl Flash {
                 .bit(wc._icrst())
                 .pes()
                 .bit(wc._pes())
-        })
+        });
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn latency(&self) -> Latency {
+        self.flash.acr.read().latency().bits().try_into().unwrap()
     }
 }
 
@@ -703,11 +698,51 @@ impl OptionsUnlocked<'_, '_> {
     }
 }
 
+#[cfg(feature = "cm4")]
 config_reg_u32! {
-    RW, AcrR, AcrW, FLASH, acr, [
-        latency => (_latency, Latency, u8, [2:0], "Latency\n\n\
+    R, AcrR, FLASH, acr, [
+        latency => (Latency, u8, [2:0], "Latency\n\n\
             Represents the ratio of the flash memory HCLK clock period to the flash memory access time
         "),
+        prften => (bool, bool, [8:8], "CPU1 Prefetch enable\n\n\
+            - `false`: CPU1 prefetch disabled\n\
+            - `true`: CPU1 prefetch enabled
+        "),
+        icen => (bool, bool, [9:9], "CPU1 Instruction cache enable\n\n\
+            - `false`: CPU1 instruction cache disabled\n\
+            - `true`: CPU1 instruction cache enabled
+        "),
+        dcen => (bool, bool, [10:10], "CPU1 data cache enable\n\n\
+            - `false`: CPU1 data cache is disabled\n\
+            - `true`: CPU1 data cache is enabled
+        "),
+        icrst => (bool, bool, [11:11], "CPU1 instruction cache reset\n\n\
+            This bit can be written only if the instruction cache is disabled\n\
+            - `false`: CPU1 instruction cache is not reset\n\
+            - `true`: CPU1 instruction cache is reset
+        "),
+        dcrst => (bool, bool, [12:12], "CPU1 data cache reset\n\n\
+            This bit can be written only if the data cache is disabled\n\
+            - `false`: CPU1 data cache is not reset\n\
+            - `true`: CPU1 data cache is reset
+        "),
+        pes => (bool, bool, [15:15], "CPU1 Program / erase suspend request\n\n\
+            - `false`: Flash memory program and erase operations granted\n\
+            - `true`: New flash memory program and erase operations suspended until this
+            bit and the same bit for CPU2 is cleared
+        "),
+        empty => (bool, bool, [16:16], "CPU1 Flash memory user area empty\n\n\
+            When read indicates whether the first location of the User Flash memory is erased or has a 
+programmed value\n\
+            - `false`: User flash memory programmed\n\
+            - `true`: User flash memory empty
+        "),
+    ]
+}
+
+#[cfg(feature = "cm4")]
+config_reg_u32! {
+    W, AcrW, FLASH, acr, [
         prften => (_prften, bool, bool, [8:8], "CPU1 Prefetch enable\n\n\
             - `false`: CPU1 prefetch disabled\n\
             - `true`: CPU1 prefetch enabled
@@ -744,8 +779,9 @@ programmed value\n\
     ]
 }
 
+#[cfg(feature = "cm0p")]
 config_reg_u32! {
-    RW, Acr2R, Acr2W, FLASH, c2acr, [
+    RW, AcrR, AcrW, FLASH, c2acr, [
         prfen => (_prfen, bool, bool, [8:8], "CPU2 prefetch enable\n\n\
             - `false`: CPU2 prefetch disabled\n\
             - `true`: CPU2 prefetch enabled
