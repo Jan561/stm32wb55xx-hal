@@ -46,7 +46,7 @@ pub trait Reset: RccBus {
 }
 
 pub trait Sysclk {
-    fn current_hertz(&self) -> u32;
+    fn current_hertz(self) -> u32;
 }
 
 pub struct Rcc {
@@ -152,8 +152,8 @@ impl Rcc {
     }
 }
 
-impl Sysclk for Rcc {
-    fn current_hertz(&self) -> u32 {
+impl Sysclk for &'_ Rcc {
+    fn current_hertz(self) -> u32 {
         self.current_sysclk_hertz()
     }
 }

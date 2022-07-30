@@ -46,7 +46,7 @@
 
 use crate::pac::pwr::{sr1, sr2};
 use crate::pac::PWR;
-use crate::rcc::{Rcc, Sysclk};
+use crate::rcc::Sysclk;
 use cortex_m::peripheral::SCB;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
@@ -94,8 +94,8 @@ impl Pwr {
     ///
     /// After calling the function, the clock speed must not be increased
     /// above 2 MHz.
-    pub fn enter_low_power_run(&self, rcc: &Rcc) -> Result<(), Error> {
-        if rcc.current_sysclk_hertz() > 2_000_000 {
+    pub fn enter_low_power_run(&self, sysclk: impl Sysclk) -> Result<(), Error> {
+        if sysclk.current_hertz() > 2_000_000 {
             return Err(Error::SysclkTooHighLpr);
         }
 
@@ -121,8 +121,8 @@ impl Pwr {
     /// # SAFETY
     ///
     /// This method must be called from SRAM
-    pub unsafe fn enter_low_power_run_no_flash(&self, rcc: &Rcc) -> Result<(), Error> {
-        if rcc.current_sysclk_hertz() > 2_000_000 {
+    pub unsafe fn enter_low_power_run_no_flash(&self, sysclk: impl Sysclk) -> Result<(), Error> {
+        if sysclk.current_hertz() > 2_000_000 {
             return Err(Error::SysclkTooHighLpr);
         }
 
@@ -226,6 +226,24 @@ impl Pwr {
         Cr1R::read_from(&self.pwr)
     }
 
+    #[cfg(feature = "cm0p")]
+    pub fn cr1<F>(&self, op: F)
+    where
+        F: for<'w> FnOnce(&Cr1R, &'w mut Cr1W) -> &'w mut Cr1W,
+    {
+        let r = Cr1R::read_from(&self.pwr.c2cr1);
+        let mut wc = Cr1W(r.0);
+
+        op(&r, &mut wc);
+
+        self.pwr.c2cr1.modify(|_, w| {
+            w.bleewkup()
+                .bit(wc._bleewkup())
+                ._802ewkup()
+                .bit(wc.__802ewkup())
+        })
+    }
+
     pub fn cr2<F>(&self, op: F)
     where
         F: for<'w> FnOnce(&Cr2R, &'w mut Cr2W) -> &'w mut Cr2W,
@@ -270,6 +288,7 @@ impl Pwr {
             return;
         }
 
+        #[cfg(feature = "cm4")]
         self.pwr.cr3.modify(|_, w| {
             w.ewup1()
                 .bit(wc._ewup1())
@@ -298,10 +317,42 @@ impl Pwr {
                 .eiwul()
                 .bit(wc._eiwul())
         });
+
+        #[cfg(feature = "cm0p")]
+        self.pwr.c2cr3.modify(|_, w| {
+            w.ewup1()
+                .bit(wc._ewup1())
+                .ewup2()
+                .bit(wc._ewup2())
+                .ewup3()
+                .bit(wc._ewup3())
+                .ewup4()
+                .bit(wc._ewup4())
+                .ewup5()
+                .bit(wc._ewup5())
+                .eblewup()
+                .bit(wc._eblewup())
+                .e802wup()
+                .bit(wc._e802wup())
+                .apc()
+                .bit(wc._apc())
+                .eiwul()
+                .bit(wc._eiwul())
+        });
     }
 
     pub fn read_cr3(&self) -> Cr3R {
         Cr3R::read_from(&self.pwr)
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn rrs(&self) -> bool {
+        self.pwr.cr3.read().rrs().bit_is_set()
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn set_rrs(&self, val: bool) {
+        self.pwr.cr3.modify(|_, w| w.rrs().bit(val));
     }
 
     pub fn cr4<F>(&self, op: F)
@@ -448,12 +499,16 @@ config_reg_u32! {
     ]
 }
 
-#[cfg(feature = "cm4")]
+#[cfg(feature = "cm0p")]
 config_reg_u32! {
-    W, Cr1W, PWR, cr1, [
-        dbp => (_dbp, bool, bool, [8:8], "Disable backup domain write protection\n\n\
-            - `false`: Access to RTC and Backup registers disabled\n\
-            - `true`: Access to RTC and Backup registers enabled
+    W, Cr1W, PWR, c2cr1, [
+        bleewkup => (_bleewkup, bool, bool, [14:14], "BLE external wakeup\n\n\
+            When set this bit forces a wakeup of the BLE controller. It is automatically reset\n\
+            when BLE controller exits its sleep mode
+        "),
+        _802ewkup => (__802ewkup, bool, bool, [15:15], "802.15.4 external wakeup signal\n\n\
+            When set this bit forces a wakeup of the 802.15.4 controller. It is automatically reset\n\
+            when 802.15.4 controller exits its sleep mode
         "),
     ]
 }
@@ -484,6 +539,7 @@ config_reg_u32! {
     ]
 }
 
+#[cfg(feature = "cm4")]
 config_reg_u32! {
     RW, Cr3R, Cr3W, PWR, cr3, [
         ewup1 => (_ewup1, bool, bool, [0:0], "Enable wakeup pin WKUP1 for CPUx\n\n\
@@ -531,6 +587,51 @@ config_reg_u32! {
         eblea => (_eblea, bool, bool, [12:12], "Enable BLE end of activity interrupt for CPUx"),
         e802a => (_e802a, bool, bool, [13:13], "Enable 802.15.4 end of activity interrupt for CPUx"),
         ec2h => (_ec2h, bool, bool, [14:14], "Enable CPU2 Hold interrupt for CPUx"),
+        eiwul => (_eiwul, bool, bool, [15:15], "Enable internal wakeup line for CPUx"),
+    ]
+}
+
+#[cfg(feature = "cm0p")]
+config_reg_u32! {
+    RW, Cr3R, Cr3W, PWR, cr3, [
+        ewup1 => (_ewup1, bool, bool, [0:0], "Enable wakeup pin WKUP1 for CPUx\n\n\
+            When this bit is set, the external wakeup pin WKUP1 is enabled and triggers an interrupt and
+            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
+            CPUx. The active edge is configured via the WP1 bit in the PWR control register 4
+            (PWR_CR4)
+        "),
+        ewup2 => (_ewup2, bool, bool, [1:1], "Enable wakeup pin WKUP2 for CPUx\n\n\
+            When this bit is set, the external wakeup pin WKUP2 is enabled and triggers an interrupt and
+            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
+            CPUx. The active edge is configured via the WP2 bit in the PWR control register 4
+            (PWR_CR4)
+        "),
+        ewup3 => (_ewup3, bool, bool, [2:2], "Enable wakeup pin WKUP3 for CPUx\n\n\
+            When this bit is set, the external wakeup pin WKUP3 is enabled and triggers an interrupt and
+            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
+            CPUx. The active edge is configured via the WP3 bit in the PWR control register 4
+            (PWR_CR4)
+        "),
+        ewup4 => (_ewup4, bool, bool, [3:3], "Enable wakeup pin WKUP4 for CPUx\n\n\
+            When this bit is set, the external wakeup pin WKUP4 is enabled and triggers an interrupt and
+            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
+            CPUx. The active edge is configured via the WP4 bit in the PWR control register 4
+            (PWR_CR4)
+        "),
+        ewup5 => (_ewup5, bool, bool, [4:4], "Enable wakeup pin WKUP5 for CPUx\n\n\
+            When this bit is set, the external wakeup pin WKUP5 is enabled and triggers an interrupt and
+            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
+            CPUx. The active edge is configured via the WP5 bit in the PWR control register 4
+            (PWR_CR4)
+        "),
+        eblewup => (_eblewup, bool, bool, [9:9], "Enable BLE host wakeup interrupt for CPU2"),
+        e802wup => (_e802wup, bool, bool, [10:10], "Enable 802.15.4 host wakeup interrupt for CPU2"),
+        apc => (_apc, bool, bool, [12:12], "Apply pull-up and pull-down configuration from CPUx\n\n\
+            When this bit for CPUx or the APC bit for the other CPU is set, the I/O pull-up and pull-
+            down configurations defined in the PWR_PUCRx and PWR_PDCRx registers are applied.
+            When both bits are cleared, the PWR_PUCRx and PWR_PDCRx registers are not applied to
+            the I/Os
+        "),
         eiwul => (_eiwul, bool, bool, [15:15], "Enable internal wakeup line for CPUx"),
     ]
 }
