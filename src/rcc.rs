@@ -10,6 +10,10 @@ pub struct ValueError(&'static str);
 #[derive(Debug)]
 pub enum Error {
     SysclkTooHighVosRange2,
+    SmpsMsi24MhzTo4MhzIllegal,
+    SmpsMsiUnsupportedRange,
+    PllEnabled,
+    SelectedClockNotEnabled,
 }
 
 macro_rules! value_error {
@@ -60,9 +64,10 @@ pub struct Rcc {
 }
 
 impl Rcc {
-    /// # Arguments
-    ///
-    /// - `op`: Closure with 2 arguments r and w
+    pub fn cr_read(&self) -> CrR {
+        CrR::read_from(&self.rcc)
+    }
+
     pub fn cfg<F>(&mut self, op: F) -> Result<(), Error>
     where
         F: for<'w> FnOnce(&CfgrR, &'w mut CfgrW) -> &'w mut CfgrW,
@@ -78,6 +83,17 @@ impl Rcc {
 
         let cr_r = CrR::read_from(&self.rcc);
         let pllcfgr = PllCfgrR::read_from(&self.rcc);
+
+        let enabled = match cfgr_w._sw().try_into().unwrap() {
+            SysclkSwitch::Msi => cr_r.msion() && cr_r.msirdy(),
+            SysclkSwitch::Hsi16 => cr_r.hsion() && cr_r.hsirdy(),
+            SysclkSwitch::Hse => cr_r.hseon() && cr_r.hserdy(),
+            SysclkSwitch::Pll => cr_r.pllon() && cr_r.pllrdy(),
+        };
+
+        if !enabled {
+            return Err(Error::SelectedClockNotEnabled);
+        }
 
         let current_sysclk = Self::sysclk_hertz(cfgr_r.sws(), &cr_r, &pllcfgr);
         let new_sysclk = Self::sysclk_hertz(CfgrR(cfgr_w.0).sw(), &cr_r, &pllcfgr);
@@ -110,7 +126,11 @@ impl Rcc {
                 .variant(cfgr_w._mcopre())
         });
 
-        while self.rcc.cfgr.read().sws().bits() != cfgr_w._sw() {}
+        while self.rcc.cfgr.read().sws().bits() != cfgr_w._sw()
+            || self.rcc.cfgr.read().hpref().bit_is_set()
+            || self.rcc.cfgr.read().ppre1f().bit_is_set()
+            || self.rcc.cfgr.read().ppre2f().bit_is_set()
+        {}
 
         if current_sysclk > new_sysclk {
             // Decrease CPU frequency
@@ -118,6 +138,127 @@ impl Rcc {
         }
 
         Ok(())
+    }
+
+    pub fn cfg_read(&self) -> CfgrR {
+        CfgrR::read_from(&self.rcc)
+    }
+
+    pub fn pllcfgr<F>(&self, op: F) -> Result<(), Error>
+    where
+        F: for<'w> FnOnce(&PllCfgrR, &'w mut PllCfgrW) -> &'w mut PllCfgrW,
+    {
+        let r = PllCfgrR::read_from(&self.rcc);
+        let mut wc = PllCfgrW(r.0);
+
+        op(&r, &mut wc);
+
+        if (wc._pllsrc() != r.pllsrc().into() || wc._pllm() != r.pllm().into())
+            && (self.rcc.cr.read().pllon().bit_is_set()
+                || self.rcc.cr.read().pllsai1on().bit_is_set())
+        {
+            return Err(Error::PllEnabled);
+        }
+
+        if (wc._plln() != r.plln().into()
+            || wc._pllp() != r.pllp().into()
+            || wc._pllq() != r.pllq().into()
+            || wc._pllr() != r.pllr().into())
+            && self.rcc.cr.read().pllon().bit_is_set()
+        {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc.pllcfgr.modify(|_, w| {
+            w.pllsrc()
+                .variant(wc._pllsrc())
+                .pllm()
+                .variant(wc._pllm())
+                .plln()
+                .variant(wc._plln())
+                .pllpen()
+                .bit(wc._pllpen())
+                .pllp()
+                .variant(wc._pllp())
+                .pllqen()
+                .bit(wc._pllqen())
+                .pllq()
+                .variant(wc._pllq())
+                .pllren()
+                .bit(wc._pllren())
+                .pllr()
+                .variant(wc._pllr())
+        });
+
+        Ok(())
+    }
+
+    pub fn pllcfgr_read(&self) -> PllCfgrR {
+        PllCfgrR::read_from(&self.rcc)
+    }
+
+    pub fn ext_cfg<F>(&self, op: F)
+    where
+        F: for<'w> FnOnce(&ExtCfgrR, &'w mut ExtCfgrW) -> &'w mut ExtCfgrW,
+    {
+        let r = ExtCfgrR::read_from(&self.rcc);
+        let mut wc = ExtCfgrW::read_from(&self.rcc);
+
+        op(&r, &mut wc);
+
+        self.rcc.extcfgr.modify(|_, w| {
+            w.shdhpre()
+                .variant(wc._shdhpre())
+                .c2hpre()
+                .variant(wc._c2hpre())
+        });
+
+        while self.rcc.extcfgr.read().shdhpref().bit_is_set()
+            || self.rcc.extcfgr.read().c2hpref().bit_is_set()
+        {}
+    }
+
+    pub fn ext_cfg_read(&self) -> ExtCfgrR {
+        ExtCfgrR::read_from(&self.rcc)
+    }
+
+    pub fn smps_cr<F>(&self, op: F) -> Result<(), Error>
+    where
+        F: for<'w> FnOnce(&SmpsCrR, &'w mut SmpsCrW) -> &'w mut SmpsCrW,
+    {
+        let r = SmpsCrR::read_from(&self.rcc);
+        let mut wc = SmpsCrW(r.0);
+
+        op(&r, &mut wc);
+
+        if wc._smpssel() == Smpssel::Msi.into() {
+            let msi_range = self.cr_read().msirange();
+
+            match msi_range {
+                MsiRange::R24M => {
+                    if wc._smpsdiv() == Smpsdiv::S4MHz.into() {
+                        return Err(Error::SmpsMsi24MhzTo4MhzIllegal);
+                    }
+                }
+                MsiRange::R16M | MsiRange::R32M | MsiRange::R48M => (),
+                _ => return Err(Error::SmpsMsiUnsupportedRange),
+            }
+        }
+
+        self.rcc.smpscr.modify(|_, w| {
+            w.smpssel()
+                .variant(wc._smpssel())
+                .smpsdiv()
+                .variant(wc._smpsdiv())
+        });
+
+        while self.rcc.smpscr.read().smpssws().bits() != wc._smpssel() {}
+
+        Ok(())
+    }
+
+    pub fn smps_cr_read(&self) -> SmpsCrR {
+        SmpsCrR::read_from(&self.rcc)
     }
 
     fn set_flash_latency(&self, clk: u32) {
@@ -189,18 +330,6 @@ impl Rcc {
         let prescaler = u8::from(ext.shdhpre()) as u32;
 
         sysclk / prescaler
-    }
-
-    pub fn cfg_read(&self) -> CfgrR {
-        CfgrR::read_from(&self.rcc)
-    }
-
-    pub fn cr_read(&self) -> CrR {
-        CrR::read_from(&self.rcc)
-    }
-
-    pub fn pllcfgr_read(&self) -> PllCfgrR {
-        PllCfgrR::read_from(&self.rcc)
     }
 
     fn msi_hertz(cr_r: &CrR) -> u32 {
@@ -336,18 +465,55 @@ config_reg_u32! {
 config_reg_u32! {
     W, ExtCfgrW, RCC, extcfgr, [
         shdhpre => (_shdhpre, PreScaler, u8, [3:0], "HCLK4 shared prescaler (AHB4, Flash memory and SRAM2)\n\n\
-            Set and cleared by software to control the division factor of the Shared HCLK4 clock (AHB4,
-            Flash memory and SRAM2).
-            The SHDHPREF flag can be checked to know if the programmed SHDHPRE prescaler value
+            Set and cleared by software to control the division factor of the Shared HCLK4 clock (AHB4, \
+            Flash memory and SRAM2). \n\
+            The SHDHPREF flag can be checked to know if the programmed SHDHPRE prescaler value \
             is applied
         "),
         c2hpre => (_c2hpre, PreScaler, u8, [7:4], "HCLK2 prescaler (CPU2)\n\n\
-            Set and cleared by software to control the division factor of the HCLK2 clock (CPU2).
-            The C2HPREF flag can be checked to know if the programmed C2HPRE prescaler value is
+            Set and cleared by software to control the division factor of the HCLK2 clock (CPU2).\n\
+            The C2HPREF flag can be checked to know if the programmed C2HPRE prescaler value is \
             applied
         "),
     ]
 }
+
+config_reg_u32! {
+    RW, Pllsai1CfgrR, Pllsai1CfgrW, RCC, pllsai1cfgr, [
+        plln => (_plln, Pllsai1N, u8, [14:8], "Audio PLLSAI1 multiplication factor for VCO\n\n\
+            These bits can be written only when the PLLSAI1 is disabled\n\n\
+            Note: The VCO output frequency must be between 64 and 344 MHz
+        "),
+        pllpen => (_pllpen, bool, bool, [16:16], "Audio PLLSAI1 PLLSAI1PCLK output enable"),
+        pllp => (_pllp, Pllp, u8, [21:17], "Audio PLLSAI1 division factor for PLLSAI1PCLK\n\n\
+            This output can be selected for SAI1 and ADC. These bits can be written only if PLLSAI1 is disabled
+        "),
+        pllqen => (_pllqen, bool, bool, [24:24], "Audio PLLSAI1 PLLSAI1QCLK output enable"),
+        pllq => (_pllq, PllQR, u8, [27:25], "Audio PLLSAI1 division factor for PLLSAI1QCLK\n\n\
+            This output can be selected for USB and True RNG clock. These bits can be written only if PLLSAI1 is disabled
+        "),
+        pllren => (_pllren, bool, bool, [28:28], "Audio PLLSAI1 PLLSAI1RCLK output enable"),
+        pllr => (_pllr, PllQR, u8, [31:29], "Audio PLLSAI1 division factor for PLLSAI1RCLK\n\n\
+            This output can be selected as system clock. These bits can be written only if PLLSAI1 is disabled
+        "),
+    ]
+}
+
+config_reg_u32! {
+    R, SmpsCrR, RCC, smpscr, [
+        smpssel => (Smpssel, u8, [1:0], "SMPS step-down converter clock selection"),
+        smpsdiv => (Smpsdiv, u8, [5:4], "SMPS step-down converter clock prescaler"),
+        smpssws => (Smpssel, u8, [9:8], "SMPS step-down converter clock switch status"),
+    ]
+}
+
+config_reg_u32! {
+    W, SmpsCrW, RCC, smpscr, [
+        smpssel => (_smpssel, Smpssel, u8, [1:0], "SMPS step-down converter clock selection"),
+        smpsdiv => (_smpsdiv, Smpsdiv, u8, [5:4], "SMPS step-down converter clock prescaler"),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum MsiRange {
@@ -593,6 +759,10 @@ impl Pllm {
     }
 }
 
+//
+// MAIN PLL
+//
+
 /// Main PLL multiplication factor for VCO
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Plln(u8);
@@ -628,7 +798,7 @@ impl From<Plln> for u8 {
 pub struct Pllp(u8);
 
 impl Pllp {
-    /// Main PLL division factor for PLLCLK
+    /// Main PLL and PLLSAI1 division factor for PLLCLK and PLLSAI1PCLK
     ///
     /// Note: The software has to set these bits so that 64 MHz is not exceeded on
     /// this domain
@@ -663,7 +833,7 @@ impl TryFrom<u8> for Pllp {
     }
 }
 
-/// Main PLL division factor for PLLQCLK and PLLRCLK
+/// Main PLL and PLLSAI1 division factor for PLLQCLK, PLLRCLK, PLLSAI1QCLK and PLLSAI1RCLK
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum PllQR {
@@ -695,6 +865,77 @@ impl PllQR {
             Self::D8 => 8,
         }
     }
+}
+
+//
+// PLLSAI1
+//
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pllsai1N(u8);
+
+impl Pllsai1N {
+    pub fn new(x: u8) -> Result<Self, ValueError> {
+        if x < 4 || x > 86 {
+            return value_error!("PLLSAI1 division factor must be in range of [4, 86]");
+        }
+
+        Ok(Self(x))
+    }
+
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for Pllsai1N {
+    type Error = ValueError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<Pllsai1N> for u8 {
+    fn from(value: Pllsai1N) -> u8 {
+        value.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum Smpssel {
+    Hsi16 = 0b00,
+    /// Msi range must be one of the following: 16/24/32/48 MHz
+    Msi = 0b01,
+    Hse = 0b10,
+}
+
+/// SMPS division prescaler
+///
+/// Note: There is always a fixed division of 2 after the prescaler has been applied
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum Smpsdiv {
+    /// SMPS incoming frequency will be 8 MHz. Forbidden, if MSI clock is selected and configured for 24 MHz.
+    /// The following division factors will be applied:
+    ///
+    /// - HSI16 (16MHz) => 1 (8 MHz)
+    /// - MSI (16 MHz) => 1 (8 MHz)
+    /// - MSI (24 MHz) => RESERVED
+    /// - MSI (32 MHz) => 2 (8 MHz)
+    /// - MSI (48 MHz) => 3 (8 MHz)
+    /// - HSE (32 MHz) => 2 (8 MHz)
+    S8MHz = 0b00,
+    /// SMPS incoming frequency will be 4 MHz. The following division factors will be applied:
+    ///
+    /// - HSI16 (16 MHz) => 2 (4 MHz)
+    /// - MSI (16 MHz) => 2 (4 MHz)
+    /// - MSI (24 MHz) => 3 (4 MHz)
+    /// - MSI (32 MHz) => 4 (4 MHz)
+    /// - MSI (48 MHz) => 6 (4 MHz)
+    /// - HSE (32 MHz) => 4 (4 MHz)
+    S4MHz = 0b01,
 }
 
 /// MSI Maximum frequency
