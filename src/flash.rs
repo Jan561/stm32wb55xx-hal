@@ -1,5 +1,5 @@
-use crate::pac::FLASH;
 use crate::signature::FlashSize;
+use crate::{pac::FLASH, pwr::Vos};
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 /// Total number of pages, indexed 0 to 255
@@ -195,7 +195,7 @@ impl Drop for UnlockedFlash<'_> {
     }
 }
 
-macro_rules! clear_sr {
+/*macro_rules! clear_sr {
     ($sr:ident, $misserr:ident) => {
         fn clear_sr(&self) {
             self.reg().$sr.modify(|_, w| {
@@ -222,7 +222,7 @@ macro_rules! clear_sr {
             });
         }
     };
-}
+}*/
 
 impl<'a> UnlockedFlash<'a> {
     fn reg(&self) -> &FLASH {
@@ -453,11 +453,16 @@ impl<'a> UnlockedFlash<'a> {
         OptionsUnlocked { flash: self }
     }
 
-    #[cfg(feature = "cm4")]
+    /*#[cfg(feature = "cm4")]
     clear_sr!(sr, miserr);
 
     #[cfg(feature = "cm0p")]
-    clear_sr!(c2sr, misserr);
+    clear_sr!(c2sr, misserr);*/
+
+    fn clear_sr(&self) {
+        // Register is cleared by writing 1 to enabled flags so we can just write the old value
+        c1_c2!(self.reg().sr, self.reg().c2sr).modify(|_, w| w);
+    }
 }
 
 pub struct OptionsUnlocked<'a, 'b> {
@@ -946,6 +951,33 @@ pub enum Latency {
     W3 = 0b011,
 }
 
+impl Latency {
+    pub fn from(vos: Vos, sysclk: u32) -> Self {
+        match vos {
+            Vos::Range1 => {
+                if sysclk <= 18_000_000 {
+                    Self::W0
+                } else if sysclk <= 36_000_000 {
+                    Self::W1
+                } else if sysclk <= 54_000_000 {
+                    Self::W2
+                } else {
+                    Self::W3
+                }
+            }
+            Vos::Range2 => {
+                if sysclk <= 6_000_000 {
+                    Self::W0
+                } else if sysclk <= 12_000_000 {
+                    Self::W1
+                } else {
+                    Self::W2
+                }
+            }
+        }
+    }
+}
+
 /// Read Protection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
 #[repr(u8)]
@@ -967,7 +999,7 @@ pub enum RdpLevel {
     /// - Only a custom boot loader will be able to access the flash main memory
     /// - *This can't be undone.* If you need to disable RDP in the future,
     /// you need to physically replace the MCU. Not even ST can help you with that
-    #[cfg(feature = "rdp_lv_2")]
+    #[cfg(feature = "flash_rdp_l2")]
     L2 = 0xCC,
 }
 

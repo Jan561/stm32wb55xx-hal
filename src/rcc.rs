@@ -1,10 +1,16 @@
+use crate::flash::Latency;
+use crate::pac::{FLASH, PWR, RCC};
 use crate::pwr::Vos;
-use crate::{flash::Flash, pac::RCC};
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use sealed::sealed;
 
 #[derive(Debug)]
 pub struct ValueError(&'static str);
+
+#[derive(Debug)]
+pub enum Error {
+    SysclkTooHighVosRange2,
+}
 
 macro_rules! value_error {
     ($str:expr) => {
@@ -57,9 +63,7 @@ impl Rcc {
     /// # Arguments
     ///
     /// - `op`: Closure with 2 arguments r and w
-    /// - `flash`: Needed when increasing or decreasing CPU frequency.
-    /// If not provided in this case, the method will panic
-    pub fn cfg<F>(&mut self, op: F, flash: Option<&Flash>)
+    pub fn cfg<F>(&mut self, op: F) -> Result<(), Error>
     where
         F: for<'w> FnOnce(&CfgrR, &'w mut CfgrW) -> &'w mut CfgrW,
     {
@@ -69,19 +73,24 @@ impl Rcc {
         op(&cfgr_r, &mut cfgr_w);
 
         if cfgr_r.0 == cfgr_w.0 {
-            return;
+            return Ok(());
         }
 
         let cr_r = CrR::read_from(&self.rcc);
         let pllcfgr = PllCfgrR::read_from(&self.rcc);
 
-        let current_sysclk = Self::sysclk_hertz(&cfgr_r, &cr_r, &pllcfgr);
-        let new_sysclk = Self::sysclk_hertz(&CfgrR(cfgr_w.0), &cr_r, &pllcfgr);
+        let current_sysclk = Self::sysclk_hertz(cfgr_r.sws(), &cr_r, &pllcfgr);
+        let new_sysclk = Self::sysclk_hertz(CfgrR(cfgr_w.0).sw(), &cr_r, &pllcfgr);
 
-        if current_sysclk > new_sysclk {
-            // Decrease CPU frequency
-        } else if current_sysclk < new_sysclk {
+        // Check vos
+        let pwr = unsafe { &*PWR::PTR };
+        if new_sysclk > 16_000_000 && pwr.cr1.read().vos().bits() == Vos::Range2.into() {
+            return Err(Error::SysclkTooHighVosRange2);
+        }
+
+        if current_sysclk < new_sysclk {
             // Increase CPU frequency
+            self.set_flash_latency(new_sysclk);
         }
 
         self.rcc.cfgr.modify(|_, w| {
@@ -100,14 +109,37 @@ impl Rcc {
                 .mcopre()
                 .variant(cfgr_w._mcopre())
         });
+
+        while self.rcc.cfgr.read().sws().bits() != cfgr_w._sw() {}
+
+        if current_sysclk > new_sysclk {
+            // Decrease CPU frequency
+            self.set_flash_latency(new_sysclk);
+        }
+
+        Ok(())
+    }
+
+    fn set_flash_latency(&self, clk: u32) {
+        // SAFETY: No safety critical accesses performed
+        let pwr = unsafe { &*PWR::PTR };
+        // SAFETY: No safety critical accesses performed
+        let flash = unsafe { &*FLASH::PTR };
+
+        let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+
+        let hclk4 = Self::hclk4(clk, &ExtCfgrR::read_from(&self.rcc));
+        let latency = Latency::from(vos, hclk4);
+
+        flash.acr.modify(|_, w| w.latency().variant(latency.into()));
     }
 
     pub fn current_sysclk_hertz(&self) -> u32 {
-        Self::sysclk_hertz(&self.cfg_read(), &self.cr_read(), &self.pllcfgr_read())
+        Self::sysclk_hertz(self.cfg_read().sws(), &self.cr_read(), &self.pllcfgr_read())
     }
 
-    fn sysclk_hertz(cfgr_r: &CfgrR, cr_r: &CrR, pllcfgr: &PllCfgrR) -> u32 {
-        match cfgr_r.sws() {
+    fn sysclk_hertz(sw: SysclkSwitch, cr_r: &CrR, pllcfgr: &PllCfgrR) -> u32 {
+        match sw {
             SysclkSwitch::Msi => Self::msi_hertz(cr_r),
             SysclkSwitch::Hsi16 => hsi16_hertz(),
             SysclkSwitch::Hse => {
@@ -133,6 +165,30 @@ impl Rcc {
                 (voc / pllr) as u32
             }
         }
+    }
+
+    pub fn current_hclk2(&self) -> u32 {
+        let sysclk = self.current_sysclk_hertz();
+
+        Self::hclk2(sysclk, &ExtCfgrR::read_from(&self.rcc))
+    }
+
+    fn hclk2(sysclk: u32, ext: &ExtCfgrR) -> u32 {
+        let prescaler = u8::from(ext.c2hpre()) as u32;
+
+        sysclk / prescaler
+    }
+
+    pub fn current_hclk4(&self) -> u32 {
+        let sysclk = self.current_sysclk_hertz();
+
+        Self::hclk4(sysclk, &ExtCfgrR::read_from(&self.rcc))
+    }
+
+    fn hclk4(sysclk: u32, ext: &ExtCfgrR) -> u32 {
+        let prescaler = u8::from(ext.shdhpre()) as u32;
+
+        sysclk / prescaler
     }
 
     pub fn cfg_read(&self) -> CfgrR {
@@ -253,6 +309,45 @@ config_reg_u32! {
     ]
 }
 
+config_reg_u32! {
+    R, ExtCfgrR, RCC, extcfgr, [
+        shdhpre => (PreScaler, u8, [3:0], "HCLK4 shared prescaler (AHB4, Flash memory and SRAM2)\n\n\
+            Set and cleared by software to control the division factor of the Shared HCLK4 clock (AHB4,
+            Flash memory and SRAM2).
+            The SHDHPREF flag can be checked to know if the programmed SHDHPRE prescaler value
+            is applied
+        "),
+        c2hpre => (PreScaler, u8, [7:4], "HCLK2 prescaler (CPU2)\n\n\
+            Set and cleared by software to control the division factor of the HCLK2 clock (CPU2).
+            The C2HPREF flag can be checked to know if the programmed C2HPRE prescaler value is
+            applied
+        "),
+        shdhpref => (bool, bool, [16:16], "HCLK4 shared prescaler flag (AHB4, Flash memory and SRAM2)"),
+        c2hpref => (bool, bool, [17:17], "HCLK2 prescaler flag (CPU2)"),
+        rfcss => (bool, bool, [20:20], "Radio system HCLK5 and APB3 selected clock source indication\n\n\
+            Set and reset by hardware to indicate which clock source is selected for the Radio system
+            HCLK5 and APB3 clock\n\n\
+            - `false`: HSI16 used for Radio system HCLK5 and APB3 clock\n\
+            - `true`: HSE divided by 2 used for Radio system HCLK5 and APB3 clock
+        "),
+    ]
+}
+
+config_reg_u32! {
+    W, ExtCfgrW, RCC, extcfgr, [
+        shdhpre => (_shdhpre, PreScaler, u8, [3:0], "HCLK4 shared prescaler (AHB4, Flash memory and SRAM2)\n\n\
+            Set and cleared by software to control the division factor of the Shared HCLK4 clock (AHB4,
+            Flash memory and SRAM2).
+            The SHDHPREF flag can be checked to know if the programmed SHDHPRE prescaler value
+            is applied
+        "),
+        c2hpre => (_c2hpre, PreScaler, u8, [7:4], "HCLK2 prescaler (CPU2)\n\n\
+            Set and cleared by software to control the division factor of the HCLK2 clock (CPU2).
+            The C2HPREF flag can be checked to know if the programmed C2HPRE prescaler value is
+            applied
+        "),
+    ]
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
 pub enum MsiRange {

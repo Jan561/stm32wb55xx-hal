@@ -32,4 +32,4 @@ optional = true
 default = ["cm4"]
 cm4 = []
 cm0p = []
-rdp_lv_2 = []
+flash_rdp_l2 = []
