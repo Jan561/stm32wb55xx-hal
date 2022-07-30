@@ -45,6 +45,10 @@ pub trait Reset: RccBus {
     fn reset(rcc: &RCC);
 }
 
+pub trait Sysclk {
+    fn current_hertz(&self) -> u32;
+}
+
 pub struct Rcc {
     rcc: RCC,
 }
@@ -98,7 +102,11 @@ impl Rcc {
         });
     }
 
-    pub fn sysclk_hertz(cfgr_r: &CfgrR, cr_r: &CrR, pllcfgr: &PllCfgrR) -> u32 {
+    pub fn current_sysclk_hertz(&self) -> u32 {
+        Self::sysclk_hertz(&self.cfg_read(), &self.cr_read(), &self.pllcfgr_read())
+    }
+
+    fn sysclk_hertz(cfgr_r: &CfgrR, cr_r: &CrR, pllcfgr: &PllCfgrR) -> u32 {
         match cfgr_r.sws() {
             SysclkSwitch::Msi => Self::msi_hertz(cr_r),
             SysclkSwitch::Hsi16 => hsi16_hertz(),
@@ -115,21 +123,38 @@ impl Rcc {
                     PllSrc::Msi => Self::msi_hertz(cr_r),
                     PllSrc::Hsi16 => hsi16_hertz(),
                     PllSrc::Hse => hse_hertz(),
-                };
+                } as u64;
 
-                let pllm = pllcfgr.pllm().div_factor() as u32;
-                let plln = pllcfgr.plln().get() as u32;
-                let pllr = pllcfgr.pllr().div_factor() as u32;
+                let pllm = pllcfgr.pllm().div_factor() as u64;
+                let plln = pllcfgr.plln().get() as u64;
+                let pllr = pllcfgr.pllr().div_factor() as u64;
 
-                // We divide first to ensure we are in bounds of u32
-                let voc = src / pllm * plln;
-                voc / pllr
+                let voc = src * plln / pllm;
+                (voc / pllr) as u32
             }
         }
     }
 
+    pub fn cfg_read(&self) -> CfgrR {
+        CfgrR::read_from(&self.rcc)
+    }
+
+    pub fn cr_read(&self) -> CrR {
+        CrR::read_from(&self.rcc)
+    }
+
+    pub fn pllcfgr_read(&self) -> PllCfgrR {
+        PllCfgrR::read_from(&self.rcc)
+    }
+
     fn msi_hertz(cr_r: &CrR) -> u32 {
         cr_r.msirange().hertz()
+    }
+}
+
+impl Sysclk for Rcc {
+    fn current_hertz(&self) -> u32 {
+        self.current_sysclk_hertz()
     }
 }
 

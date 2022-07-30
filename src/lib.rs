@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(never_type)]
 
 #[macro_use]
 mod macros;

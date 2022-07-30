@@ -1,5 +1,19 @@
 use core::marker::PhantomData;
 
+#[cfg(feature = "cm4")]
+macro_rules! c1_c2 {
+    ($c1:expr, $c2:expr $(,)?) => {
+        $c1
+    };
+}
+
+#[cfg(feature = "cm0p")]
+macro_rules! c1_c2 {
+    ($c1:expr, $c2:expr $(,)?) => {
+        $c2
+    };
+}
+
 macro_rules! define_ptr_type {
     ($name:ident, $ptr:expr) => {
         impl $name {

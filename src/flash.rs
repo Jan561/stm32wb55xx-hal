@@ -42,22 +42,32 @@ impl FlashUid {
     }
 }
 
-pub enum Error<S> {
+pub enum Error {
     /// Program / Erase operation suspended (PESD)
     OperationSuspended,
     /// CPU1 attempts to read/write from/to secured pages
     SecureFlashError,
     /// Error with custom status
-    Status(S),
+    Status(Status),
 }
 
 pub struct Status {
+    #[cfg(feature = "cm4")]
     r: crate::pac::flash::sr::R,
+    #[cfg(feature = "cm0p")]
+    r: crate::pac::flash::c2sr::R,
 }
 
 impl Status {
     /// Status register
+    #[cfg(feature = "cm4")]
     pub fn r(&self) -> &crate::pac::flash::sr::R {
+        &self.r
+    }
+
+    /// Status register
+    #[cfg(feature = "cm0p")]
+    pub fn r(&self) -> &crate::pac::flash::c2sr::R {
         &self.r
     }
 
@@ -207,113 +217,9 @@ impl Drop for UnlockedFlash<'_> {
     }
 }
 
-// See RM0434 Rev9 p. 82
-macro_rules! page_erase {
-    ($name:ident, $sr:ident, $cr:ident, $status:ident, $cisr:ident, $doc:tt) => {
-        #[doc=$doc]
-        pub unsafe fn $name(&mut self, page: u8) -> Result<(), Error<$status>> {
-            while self.reg().$sr.read().bsy().bit_is_set() {}
-
-            if self.reg().$sr.read().pesd().bit_is_set() {
-                return Err(Error::OperationSuspended);
-            }
-
-            self.$cisr();
-
-            self.reg().$cr.modify(|_, w| {
-                w
-                    // Set page number
-                    .pnb()
-                    .variant(page)
-                    // No mass erase
-                    .mer()
-                    .clear_bit()
-                    // Erase that page
-                    .per()
-                    .set_bit()
-                    // No programming
-                    .pg()
-                    .clear_bit()
-                    // No fast programming
-                    .fstpg()
-                    .clear_bit()
-                    // Start
-                    .strt()
-                    .set_bit()
-            });
-
-            while self.reg().$sr.read().bsy().bit_is_set() {}
-
-            Ok(())
-        }
-    };
-}
-
-// See RM0434 Rev 9 p. 84
-macro_rules! program {
-    ($name:ident, $sr:ident, $cr:ident, $status:ident, $cisr:ident, $doc:tt) => {
-        #[doc=$doc]
-        pub fn $name(&mut self, offset: usize, data: &[u8]) -> Result<(), Error<$status>> {
-            if data.len() % 8 != 0 || offset % 8 != 0 {
-                panic!("Size of `data` and offset must be a multiple of 64 bit");
-            }
-
-            self.$cisr();
-
-            self.reg().$cr.modify(|_, w| {
-                w
-                    // Programming Mode
-                    .pg()
-                    .set_bit()
-                    // No page erase
-                    .per()
-                    .clear_bit()
-                    // No mass erase
-                    .mer()
-                    .clear_bit()
-                    // No fast programming
-                    .fstpg()
-                    .clear_bit()
-            });
-
-            let mut ptr = self.address() as *mut u32;
-            // SAFETY: offset is in bounds of flash
-            // offset / 4 bytes
-            ptr = unsafe { ptr.add(offset >> 2) };
-
-            for chunk in data.chunks_exact(8) {
-                let w1 = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
-                let w2 = u32::from_le_bytes(chunk[4..].try_into().unwrap());
-
-                // SAFETY: RM0434 Rev 9 p. 84 - Standard Programming - Step 4
-                unsafe {
-                    core::ptr::write_volatile(ptr, w1);
-                    ptr = ptr.add(1);
-                    core::ptr::write_volatile(ptr, w2);
-                    ptr = ptr.add(1);
-                }
-
-                while self.reg().$sr.read().bsy().bit_is_set() {}
-
-                if self.reg().$sr.read().eop().bit_is_set() {
-                    self.reg().$sr.modify(|_, w| w.eop().clear_bit());
-                } else {
-                    return Err(Error::Status($status {
-                        r: self.reg().$sr.read(),
-                    }));
-                }
-            }
-
-            self.reg().$cr.modify(|_, w| w.pg().clear_bit());
-
-            Ok(())
-        }
-    };
-}
-
 macro_rules! clear_sr {
-    ($name:ident, $sr:ident, $misserr:ident) => {
-        fn $name(&self) {
+    ($sr:ident, $misserr:ident) => {
+        fn clear_sr(&self) {
             self.reg().$sr.modify(|_, w| {
                 w.eop()
                     .set_bit()
@@ -349,30 +255,51 @@ impl<'a> UnlockedFlash<'a> {
         self.flash.address()
     }
 
-    page_erase!(
-        page_erase_1,
-        sr,
-        cr,
-        Status,
-        clear_sr_1,
-        "CPU1: Erase a single page\n\n\
-        This page must not be secure\n\n\
-        # SAFETY\n\n\
-        Make sure you don't erase your code
-    "
-    );
+    /// Erase a single page
+    ///
+    /// # SAFETY
+    ///
+    /// Make sure you don't erase your code
+    //
+    // See RM0434 Rev9 p. 82
+    pub unsafe fn page_erase(&mut self, page: u8) -> Result<(), Error> {
+        let sr = &c1_c2!(self.reg().sr, self.reg().c2sr);
+        let cr = &c1_c2!(self.reg().cr, self.reg().c2cr);
 
-    page_erase!(
-        page_erase_2,
-        c2sr,
-        c2cr,
-        Status2,
-        clear_sr_2,
-        "CPU2: Erase a single page\n\n\
-        # SAFETY\n\n\
-        Make sure you don't erase your code
-    "
-    );
+        while sr.read().bsy().bit_is_set() {}
+
+        if sr.read().pesd().bit_is_set() {
+            return Err(Error::OperationSuspended);
+        }
+
+        self.clear_sr();
+
+        cr.modify(|_, w| {
+            w
+                // Set page number
+                .pnb()
+                .variant(page)
+                // No mass erase
+                .mer()
+                .clear_bit()
+                // Erase that page
+                .per()
+                .set_bit()
+                // No programming
+                .pg()
+                .clear_bit()
+                // No fast programming
+                .fstpg()
+                .clear_bit()
+                // Start
+                .strt()
+                .set_bit()
+        });
+
+        while sr.read().bsy().bit_is_set() {}
+
+        Ok(())
+    }
 
     /// CPU2: Complete flash will be wiped
     ///
@@ -381,10 +308,11 @@ impl<'a> UnlockedFlash<'a> {
     /// This must be executed from SRAM
     //
     // See RM0434 Rev 9 p. 83
-    pub unsafe fn mass_erase(&mut self) -> Result<(), Error<Status2>> {
+    #[cfg(feature = "cm0p")]
+    pub unsafe fn mass_erase(&mut self) -> Result<(), Error> {
         while self.flash.flash.c2sr.read().bsy().bit_is_set() {}
 
-        self.clear_sr_2();
+        self.clear_sr();
 
         self.flash.flash.c2cr.modify(|_, w| {
             w
@@ -410,29 +338,68 @@ impl<'a> UnlockedFlash<'a> {
         Ok(())
     }
 
-    program!(
-        program_1,
-        sr,
-        cr,
-        Status,
-        clear_sr_1,
-        "CPU1: Normal programming of data into flash\n\n\
-        - `offset` must be multiple of 8\n\
-        - size of `data` must be multiple of 64 bits
-    "
-    );
+    /// Normal programming of data into flash
+    ///
+    /// - `offset` must be multiple of 8
+    /// - size of `data` must be multiple of 64 bits
+    //
+    // See RM0434 Rev 9 p. 84
+    pub fn program(&mut self, offset: usize, data: &[u8]) -> Result<(), Error> {
+        if data.len() % 8 != 0 || offset % 8 != 0 {
+            panic!("Size of `data` and offset must be a multiple of 64 bit");
+        }
 
-    program!(
-        program_2,
-        c2sr,
-        c2cr,
-        Status2,
-        clear_sr_2,
-        "CPU2: Normal programming of data info flash\n\n\
-        - `offset` must be multiple of 8\n\
-        - size of `data` must be multiple of 64 bits
-    "
-    );
+        self.clear_sr();
+
+        let cr = &c1_c2!(self.reg().cr, self.reg().c2cr);
+        let sr = &c1_c2!(self.reg().sr, self.reg().c2sr);
+
+        cr.modify(|_, w| {
+            w
+                // Programming Mode
+                .pg()
+                .set_bit()
+                // No page erase
+                .per()
+                .clear_bit()
+                // No mass erase
+                .mer()
+                .clear_bit()
+                // No fast programming
+                .fstpg()
+                .clear_bit()
+        });
+
+        let mut ptr = self.address() as *mut u32;
+        // SAFETY: offset is in bounds of flash
+        // offset / 4 bytes
+        ptr = unsafe { ptr.add(offset >> 2) };
+
+        for chunk in data.chunks_exact(8) {
+            let w1 = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+            let w2 = u32::from_le_bytes(chunk[4..].try_into().unwrap());
+
+            // SAFETY: RM0434 Rev 9 p. 84 - Standard Programming - Step 4
+            unsafe {
+                core::ptr::write_volatile(ptr, w1);
+                ptr = ptr.add(1);
+                core::ptr::write_volatile(ptr, w2);
+                ptr = ptr.add(1);
+            }
+
+            while sr.read().bsy().bit_is_set() {}
+
+            if sr.read().eop().bit_is_set() {
+                sr.modify(|_, w| w.eop().clear_bit());
+            } else {
+                return Err(Error::Status(Status { r: sr.read() }));
+            }
+        }
+
+        cr.modify(|_, w| w.pg().clear_bit());
+
+        Ok(())
+    }
 
     /// CPU2: Perform fast programming
     ///
@@ -445,11 +412,8 @@ impl<'a> UnlockedFlash<'a> {
     /// This must be executed from SRAM
     //
     // See RM0434 Rev 9 p. 85
-    pub unsafe fn fast_program(
-        &mut self,
-        offset: usize,
-        data: &[u8],
-    ) -> Result<(), Error<Status2>> {
+    #[cfg(feature = "cm0p")]
+    pub unsafe fn fast_program(&mut self, offset: usize, data: &[u8]) -> Result<(), Error> {
         if data.len() % 512 != 0 || offset % 512 != 0 {
             panic!("Size of `data` and offset must be a multiple of 512 Bytes");
         }
@@ -458,7 +422,7 @@ impl<'a> UnlockedFlash<'a> {
 
         while self.flash.flash.c2sr.read().bsy().bit_is_set() {}
 
-        self.clear_sr_2();
+        self.clear_sr();
 
         self.flash.flash.c2cr.modify(|_, w| {
             w
@@ -494,7 +458,7 @@ impl<'a> UnlockedFlash<'a> {
             if self.flash.flash.c2sr.read().eop().bit_is_set() {
                 self.flash.flash.c2sr.modify(|_, w| w.eop().clear_bit());
             } else {
-                return Err(Error::Status(Status2 {
+                return Err(Error::Status(Status {
                     r: self.flash.flash.c2sr.read(),
                 }));
             }
@@ -511,9 +475,11 @@ impl<'a> UnlockedFlash<'a> {
         OptionsUnlocked { flash: self }
     }
 
-    clear_sr!(clear_sr_1, sr, miserr);
+    #[cfg(feature = "cm4")]
+    clear_sr!(sr, miserr);
 
-    clear_sr!(clear_sr_2, c2sr, misserr);
+    #[cfg(feature = "cm0p")]
+    clear_sr!(c2sr, misserr);
 }
 
 pub struct OptionsUnlocked<'a, 'b> {
@@ -531,7 +497,7 @@ impl OptionsUnlocked<'_, '_> {
         self.flash.reg()
     }
 
-    pub fn user_options<F>(&self, op: F) -> Result<(), Error<Status>>
+    pub fn user_options<F>(&self, op: F) -> Result<(), Error>
     where
         F: for<'w> FnOnce(&UserOptionsR, &'w mut UserOptionsW) -> &'w mut UserOptionsW,
     {
