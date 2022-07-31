@@ -17,6 +17,7 @@ pub enum Error {
     ClockInUse,
     PllNoClockSelected,
     PllClkIllegalRange,
+    MsiNotReady,
 }
 
 macro_rules! value_error {
@@ -83,6 +84,8 @@ impl Rcc {
         let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
 
         let pll_rising = !r.pllon() && wc._pllon();
+        let msi_range_changed = wc._msirange() != r.msirange().into();
+        let hse_pre_changed = wc._hsepre() != r.hsepre();
 
         // MSI
 
@@ -139,6 +142,8 @@ impl Rcc {
             return Err(Error::PllNoClockSelected);
         }
 
+        let check_pll = pll_rising || (wc._pllon() && (msi_range_changed || hse_pre_changed));
+
         let pll_m_in = match pllcfgr.pllsrc() {
             PllSrc::NoClock => unreachable!(),
             PllSrc::Msi => MsiRange::try_from(wc._msirange()).unwrap().hertz(),
@@ -147,7 +152,7 @@ impl Rcc {
         };
 
         // Check PLL M input clock when in Range 2
-        if pll_rising && vos == Vos::Range2 {
+        if check_pll && vos == Vos::Range2 {
             if pll_m_in <= 16_000_000 {
                 return Err(Error::PllClkIllegalRange);
             }
@@ -156,7 +161,7 @@ impl Rcc {
         let vco_in_times_3 = pll_m_in * 3 / pllcfgr.pllm().div_factor() as u32;
 
         // Check PLL VCO input frequency (after PLL M)
-        if pll_rising && (vco_in_times_3 > 48_000_000 || vco_in_times_3 < 8_000_000) {
+        if check_pll && (vco_in_times_3 > 48_000_000 || vco_in_times_3 < 8_000_000) {
             return Err(Error::PllClkIllegalRange);
         }
 
@@ -172,7 +177,7 @@ impl Rcc {
         };
 
         // Check PLL VCO output frequency (after PLL N) (for PLL MAIN and PLLSAI1)
-        if pll_rising
+        if check_pll
             && (vco_out_times_3_main > 344_000_000 * 3
                 || vco_out_times_3_main < 96_000_000 * 3
                 || vco_out_times_3_sai1 > 344_000_000 * 3
@@ -183,35 +188,78 @@ impl Rcc {
 
         // Check PLLP, PLLQ, PLLR enabled outputs for PLL MAIN
         let pllp_times_3_main = vco_out_times_3_main / pllcfgr.pllp().get() as u32;
-        if pll_rising && pllp_times_3_main > 64_000_000 * 3 {
+        if check_pll && pllp_times_3_main > 64_000_000 * 3 {
             return Err(Error::PllClkIllegalRange);
         }
 
         let pllq_times_3_main = vco_out_times_3_main / pllcfgr.pllq().div_factor() as u32;
-        if pll_rising && pllq_times_3_main > 64_000_000 * 3 {
+        if check_pll && pllq_times_3_main > 64_000_000 * 3 {
             return Err(Error::PllClkIllegalRange);
         }
 
         let pllr_times_3_main = vco_out_times_3_main / pllcfgr.pllr().div_factor() as u32;
-        if pll_rising && pllr_times_3_main > 64_000_000 * 3 {
+        if check_pll && pllr_times_3_main > 64_000_000 * 3 {
             return Err(Error::PllClkIllegalRange);
         }
 
         // Check PLLP, PLLQ, PLLR enabled outputs for PLLSAI1
         let pllp_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllp().get() as u32;
-        if pll_rising && pllp_times_3_sai1 > 64_000_000 * 3 {
+        if check_pll && pllp_times_3_sai1 > 64_000_000 * 3 {
             return Err(Error::PllClkIllegalRange);
         }
 
         let pllq_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllq().div_factor() as u32;
-        if pll_rising && pllq_times_3_sai1 > 64_000_000 * 3 {
+        if check_pll && pllq_times_3_sai1 > 64_000_000 * 3 {
             return Err(Error::PllClkIllegalRange);
         }
 
         let pllr_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllr().div_factor() as u32;
-        if pll_rising && pllr_times_3_sai1 > 64_000_000 * 3 {
+        if check_pll && pllr_times_3_sai1 > 64_000_000 * 3 {
             return Err(Error::PllClkIllegalRange);
         }
+
+        // MSIRANGE shall not be changed when MSI is on but not ready
+        if r.msion() && !r.msirdy() && wc._msirange() != r.msirange().into() {
+            return Err(Error::MsiNotReady);
+        }
+
+        // New MSIRANGE must be within the VOS limits if used as sysclk
+        if cfgr.sws() == SysclkSwitch::Msi
+            && vos == Vos::Range2
+            && MsiRange::R16M < wc._msirange().try_into().unwrap()
+        {
+            return Err(Error::SysclkTooHighVosRange2);
+        }
+
+        // HSEPRE flag must be set if HSE is used as sysclk
+        if cfgr.sws() == SysclkSwitch::Hse && vos == Vos::Range2 && !wc._hsepre() {
+            return Err(Error::SysclkTooHighVosRange2);
+        }
+
+        self.rcc.cr.modify(|_, w| {
+            w.msion()
+                .bit(wc._msion())
+                .msipllen()
+                .bit(wc._msipllen())
+                .msirange()
+                .variant(wc._msirange())
+                .hsion()
+                .bit(wc._hsion())
+                .hsikeron()
+                .bit(wc._hsikeron())
+                .hsiasfs()
+                .bit(wc._hsiasfs())
+                .hseon()
+                .bit(wc._hseon())
+                .csson()
+                .bit(wc._csson())
+                .hsepre()
+                .bit(wc._hsepre())
+                .pllon()
+                .bit(wc._pllon())
+                .pllsai1on()
+                .bit(wc._pllsai1on())
+        });
 
         Ok(())
     }
@@ -439,13 +487,7 @@ impl Rcc {
         match sw {
             SysclkSwitch::Msi => Self::msi_hertz(cr_r),
             SysclkSwitch::Hsi16 => hsi16_hertz(),
-            SysclkSwitch::Hse => {
-                if cr_r.hsepre() {
-                    hse_hertz() / 2
-                } else {
-                    hse_hertz()
-                }
-            }
+            SysclkSwitch::Hse => hse_output_hertz(cr_r.hsepre()),
             SysclkSwitch::Pll => {
                 let src = match pllcfgr.pllsrc() {
                     PllSrc::NoClock => 0,
