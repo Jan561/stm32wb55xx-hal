@@ -84,6 +84,7 @@ impl Rcc {
         let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
 
         let pll_rising = !r.pllon() && wc._pllon();
+        let pllsai1_rising = !r.pllsai1on() && wc._pllsai1on();
         let msi_range_changed = wc._msirange() != r.msirange().into();
         let hse_pre_changed = wc._hsepre() != r.hsepre();
 
@@ -138,11 +139,13 @@ impl Rcc {
         }
 
         // Prevent enabling the PLL when no clock is selected
-        if pll_rising && pllcfgr.pllsrc() == PllSrc::NoClock {
+        if (pll_rising || pllsai1_rising) && pllcfgr.pllsrc() == PllSrc::NoClock {
             return Err(Error::PllNoClockSelected);
         }
 
         let check_pll = pll_rising || (wc._pllon() && (msi_range_changed || hse_pre_changed));
+        let check_pllsai1 =
+            pllsai1_rising || (wc._pllsai1on() && (msi_range_changed || hse_pre_changed));
 
         let pll_m_in = match pllcfgr.pllsrc() {
             PllSrc::NoClock => unreachable!(),
@@ -152,7 +155,7 @@ impl Rcc {
         };
 
         // Check PLL M input clock when in Range 2
-        if check_pll && vos == Vos::Range2 {
+        if (check_pll || check_pllsai1) && vos == Vos::Range2 {
             if pll_m_in <= 16_000_000 {
                 return Err(Error::PllClkIllegalRange);
             }
@@ -161,7 +164,9 @@ impl Rcc {
         let vco_in_times_3 = pll_m_in * 3 / pllcfgr.pllm().div_factor() as u32;
 
         // Check PLL VCO input frequency (after PLL M)
-        if check_pll && (vco_in_times_3 > 48_000_000 || vco_in_times_3 < 8_000_000) {
+        if (check_pll || check_pllsai1)
+            && (vco_in_times_3 > 48_000_000 || vco_in_times_3 < 8_000_000)
+        {
             return Err(Error::PllClkIllegalRange);
         }
 
@@ -178,10 +183,13 @@ impl Rcc {
 
         // Check PLL VCO output frequency (after PLL N) (for PLL MAIN and PLLSAI1)
         if check_pll
-            && (vco_out_times_3_main > 344_000_000 * 3
-                || vco_out_times_3_main < 96_000_000 * 3
-                || vco_out_times_3_sai1 > 344_000_000 * 3
-                || vco_out_times_3_sai1 < 64_000_000 * 3)
+            && (vco_out_times_3_main > 344_000_000 * 3 || vco_out_times_3_main < 96_000_000 * 3)
+        {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        if check_pllsai1
+            && (vco_out_times_3_sai1 > 344_000_000 * 3 || vco_out_times_3_sai1 < 64_000_000 * 3)
         {
             return Err(Error::PllClkIllegalRange);
         }
@@ -204,17 +212,17 @@ impl Rcc {
 
         // Check PLLP, PLLQ, PLLR enabled outputs for PLLSAI1
         let pllp_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllp().get() as u32;
-        if check_pll && pllp_times_3_sai1 > 64_000_000 * 3 {
+        if check_pllsai1 && pllp_times_3_sai1 > 64_000_000 * 3 {
             return Err(Error::PllClkIllegalRange);
         }
 
         let pllq_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllq().div_factor() as u32;
-        if check_pll && pllq_times_3_sai1 > 64_000_000 * 3 {
+        if check_pllsai1 && pllq_times_3_sai1 > 64_000_000 * 3 {
             return Err(Error::PllClkIllegalRange);
         }
 
         let pllr_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllr().div_factor() as u32;
-        if check_pll && pllr_times_3_sai1 > 64_000_000 * 3 {
+        if check_pllsai1 && pllr_times_3_sai1 > 64_000_000 * 3 {
             return Err(Error::PllClkIllegalRange);
         }
 
@@ -231,7 +239,7 @@ impl Rcc {
             return Err(Error::SysclkTooHighVosRange2);
         }
 
-        // HSEPRE flag must be set if HSE is used as sysclk
+        // HSEPRE flag must be set if HSE is used as sysclk in VOS Range 2
         if cfgr.sws() == SysclkSwitch::Hse && vos == Vos::Range2 && !wc._hsepre() {
             return Err(Error::SysclkTooHighVosRange2);
         }
@@ -260,6 +268,11 @@ impl Rcc {
                 .pllsai1on()
                 .bit(wc._pllsai1on())
         });
+
+        while wc._msion() && self.rcc.cr.read().msirdy().bit_is_clear() {}
+        while wc._hsion() && self.rcc.cr.read().hsirdy().bit_is_clear() {}
+        while wc._hseon() && self.rcc.cr.read().hserdy().bit_is_clear() {}
+        while wc._pllon() && self.rcc.cr.read().pllrdy().bit_is_clear() {}
 
         Ok(())
     }
