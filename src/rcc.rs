@@ -272,7 +272,9 @@ impl Rcc {
         while wc._msion() && self.rcc.cr.read().msirdy().bit_is_clear() {}
         while wc._hsion() && self.rcc.cr.read().hsirdy().bit_is_clear() {}
         while wc._hseon() && self.rcc.cr.read().hserdy().bit_is_clear() {}
+        while wc._hsikeron() && self.rcc.cr.read().hsikerdy().bit_is_clear() {}
         while wc._pllon() && self.rcc.cr.read().pllrdy().bit_is_clear() {}
+        while wc._pllsai1on() && self.rcc.cr.read().pllsai1rdy().bit_is_clear() {}
 
         Ok(())
     }
