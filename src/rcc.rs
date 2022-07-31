@@ -15,6 +15,8 @@ pub enum Error {
     PllEnabled,
     SelectedClockNotEnabled,
     ClockInUse,
+    PllNoClockSelected,
+    PllClkIllegalRange,
 }
 
 macro_rules! value_error {
@@ -77,6 +79,11 @@ impl Rcc {
         let cfgr = self.cfg_read();
         let pllcfgr = self.pllcfgr_read();
 
+        let pwr = unsafe { &*PWR::PTR };
+        let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+
+        let pll_rising = !r.pllon() && wc._pllon();
+
         // MSI
 
         // Check if clock shall be disabled but is currently used by sysclk or pll
@@ -84,6 +91,11 @@ impl Rcc {
             && (cfgr.sws() == SysclkSwitch::Msi || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Msi))
         {
             return Err(Error::ClockInUse);
+        }
+
+        // Check if PLL shall be enabled when selected clock source is disabled
+        if pll_rising && cfgr.sws() == SysclkSwitch::Msi && !wc._msion() {
+            return Err(Error::SelectedClockNotEnabled);
         }
 
         // HSI16
@@ -96,6 +108,11 @@ impl Rcc {
             return Err(Error::ClockInUse);
         }
 
+        // Check if PLL shall be enabled when selected clock source is disabled
+        if pll_rising && cfgr.sws() == SysclkSwitch::Hsi16 && !wc._hsion() {
+            return Err(Error::SelectedClockNotEnabled);
+        }
+
         // HSE
 
         // Check if clock shall be disabled but is currently used by sysclk or pll
@@ -105,11 +122,95 @@ impl Rcc {
             return Err(Error::ClockInUse);
         }
 
+        // Check if PLL shall be enabled when selected clock source is disabled
+        if pll_rising && cfgr.sws() == SysclkSwitch::Hse && !wc._hseon() {
+            return Err(Error::SelectedClockNotEnabled);
+        }
+
         // PLL
 
         // Check if clock shall be disabled but is currently used by sysclk
         if !wc._pllon() && cfgr.sws() == SysclkSwitch::Pll {
             return Err(Error::ClockInUse);
+        }
+
+        // Prevent enabling the PLL when no clock is selected
+        if pll_rising && pllcfgr.pllsrc() == PllSrc::NoClock {
+            return Err(Error::PllNoClockSelected);
+        }
+
+        let pll_m_in = match pllcfgr.pllsrc() {
+            PllSrc::NoClock => unreachable!(),
+            PllSrc::Msi => MsiRange::try_from(wc._msirange()).unwrap().hertz(),
+            PllSrc::Hsi16 => hsi16_hertz(),
+            PllSrc::Hse => hse_output_hertz(wc._hsepre()),
+        };
+
+        // Check PLL M input clock when in Range 2
+        if pll_rising && vos == Vos::Range2 {
+            if pll_m_in <= 16_000_000 {
+                return Err(Error::PllClkIllegalRange);
+            }
+        }
+
+        let vco_in_times_3 = pll_m_in * 3 / pllcfgr.pllm().div_factor() as u32;
+
+        // Check PLL VCO input frequency (after PLL M)
+        if pll_rising && (vco_in_times_3 > 48_000_000 || vco_in_times_3 < 8_000_000) {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        let vco_out_times_3_main = match vco_in_times_3.checked_mul(pllcfgr.plln().get() as u32) {
+            Some(x) => x,
+            None => return Err(Error::PllClkIllegalRange),
+        };
+        let pllsai1cfgr = self.pllsai1cfgr_read();
+        let vco_out_times_3_sai1 = match vco_in_times_3.checked_mul(pllsai1cfgr.plln().get() as u32)
+        {
+            Some(x) => x,
+            None => return Err(Error::PllClkIllegalRange),
+        };
+
+        // Check PLL VCO output frequency (after PLL N) (for PLL MAIN and PLLSAI1)
+        if pll_rising
+            && (vco_out_times_3_main > 344_000_000 * 3
+                || vco_out_times_3_main < 96_000_000 * 3
+                || vco_out_times_3_sai1 > 344_000_000 * 3
+                || vco_out_times_3_sai1 < 64_000_000 * 3)
+        {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        // Check PLLP, PLLQ, PLLR enabled outputs for PLL MAIN
+        let pllp_times_3_main = vco_out_times_3_main / pllcfgr.pllp().get() as u32;
+        if pll_rising && pllp_times_3_main > 64_000_000 * 3 {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        let pllq_times_3_main = vco_out_times_3_main / pllcfgr.pllq().div_factor() as u32;
+        if pll_rising && pllq_times_3_main > 64_000_000 * 3 {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        let pllr_times_3_main = vco_out_times_3_main / pllcfgr.pllr().div_factor() as u32;
+        if pll_rising && pllr_times_3_main > 64_000_000 * 3 {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        // Check PLLP, PLLQ, PLLR enabled outputs for PLLSAI1
+        let pllp_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllp().get() as u32;
+        if pll_rising && pllp_times_3_sai1 > 64_000_000 * 3 {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        let pllq_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllq().div_factor() as u32;
+        if pll_rising && pllq_times_3_sai1 > 64_000_000 * 3 {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        let pllr_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllr().div_factor() as u32;
+        if pll_rising && pllr_times_3_sai1 > 64_000_000 * 3 {
+            return Err(Error::PllClkIllegalRange);
         }
 
         Ok(())
@@ -246,6 +347,10 @@ impl Rcc {
 
     pub fn pllcfgr_read(&self) -> PllCfgrR {
         PllCfgrR::read_from(&self.rcc)
+    }
+
+    pub fn pllsai1cfgr_read(&self) -> Pllsai1CfgrR {
+        Pllsai1CfgrR::read_from(&self.rcc)
     }
 
     pub fn ext_cfg<F>(&self, op: F)
@@ -1012,6 +1117,13 @@ pub const fn hsi48_hertz() -> u32 {
 /// Note: If Range 2 is selected, HSEPRE must be set to divide the frequency by 2
 pub const fn hse_hertz() -> u32 {
     32_000_000
+}
+
+pub const fn hse_output_hertz(hsepre: bool) -> u32 {
+    match hsepre {
+        false => hse_hertz(),
+        true => hse_hertz() / 2,
+    }
 }
 
 /// PLL and PLLSAI1 maximum frequency
