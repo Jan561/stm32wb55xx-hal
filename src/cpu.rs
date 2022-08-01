@@ -21,7 +21,7 @@ impl Cpu {
         mask_u32!(MASK, OFFSET, [15:4]);
 
         // SAFETY: See reference of PTR
-        let reg = unsafe { core::ptr::read_volatile(Self::PTR) };
+        let reg = unsafe { &*Self::PTR };
         let val = get_u32!(u16, reg, MASK, OFFSET);
 
         if val == Self::M0P {

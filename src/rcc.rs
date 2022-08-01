@@ -418,6 +418,33 @@ impl Rcc {
         PllCfgrR::read_from(&self.rcc)
     }
 
+    pub fn pllsai1cfgr<F>(&mut self, op: F) -> Result<(), Error>
+    where
+        F: for<'w> FnOnce(&Pllsai1CfgrR, &'w mut Pllsai1CfgrW) -> &'w mut Pllsai1CfgrW,
+    {
+        let r = Pllsai1CfgrR::read_from(&self.rcc);
+        let mut wc = Pllsai1CfgrW(r.0);
+
+        op(&r, &mut wc);
+
+        if r.0 == wc.0 {
+            return Ok(());
+        }
+
+        if (wc._plln() != r.plln().into()
+            || wc._pllp() != r.pllp().into()
+            || wc._pllq() != r.pllq().into()
+            || wc._pllr() != r.pllr().into())
+            && self.rcc.cr.read().pllsai1on().bit_is_set()
+        {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc.pllsai1cfgr.modify(|_, w| unsafe { w.bits(wc.0) });
+
+        Ok(())
+    }
+
     pub fn pllsai1cfgr_read(&self) -> Pllsai1CfgrR {
         Pllsai1CfgrR::read_from(&self.rcc)
     }
