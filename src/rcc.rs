@@ -3,6 +3,7 @@ use crate::pac::{FLASH, PWR, RCC};
 use crate::pwr::Vos;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use sealed::sealed;
+use stm32wb::stm32wb55::rcc::cifr;
 
 #[derive(Debug)]
 pub struct ValueError(&'static str);
@@ -143,9 +144,9 @@ impl Rcc {
             return Err(Error::PllNoClockSelected);
         }
 
-        let check_pll = pll_rising || (wc._pllon() && (msi_range_changed || hse_pre_changed));
+        let check_pll = pll_rising || (r.pllon() && (msi_range_changed || hse_pre_changed));
         let check_pllsai1 =
-            pllsai1_rising || (wc._pllsai1on() && (msi_range_changed || hse_pre_changed));
+            pllsai1_rising || (r.pllsai1on() && (msi_range_changed || hse_pre_changed));
 
         let pll_m_in = match pllcfgr.pllsrc() {
             PllSrc::NoClock => unreachable!(),
@@ -441,6 +442,80 @@ impl Rcc {
         ExtCfgrR::read_from(&self.rcc)
     }
 
+    pub fn cier<F>(&self, op: F)
+    where
+        F: for<'w> FnOnce(&CierR, &'w mut CierW) -> &'w mut CierW,
+    {
+        let r = CierR::read_from(&self.rcc);
+        let mut wc = CierW(r.0);
+
+        op(&r, &mut wc);
+
+        self.rcc.cier.modify(|_, w| {
+            w.lsi1rdyie()
+                .bit(wc._lsi1rdyie())
+                .lserdyie()
+                .bit(wc._lserdyie())
+                .msirdyie()
+                .bit(wc._msirdyie())
+                .hsirdyie()
+                .bit(wc._hsirdyie())
+                .hserdyie()
+                .bit(wc._hserdyie())
+                .pllrdyie()
+                .bit(wc._pllrdyie())
+                .pllsai1rdyie()
+                .bit(wc._pllsai1rdyie())
+                .lsecssie()
+                .bit(wc._lsecssie())
+                .hsi48rdyie()
+                .bit(wc._hsi48rdyie())
+                .lsi2rdyie()
+                .bit(wc._lsi2rdyie())
+        });
+    }
+
+    pub fn cier_read(&self) -> CierR {
+        CierR::read_from(&self.rcc)
+    }
+
+    pub fn cifr_read(&self) -> cifr::R {
+        self.rcc.cifr.read()
+    }
+
+    pub fn cicr<F>(&self, op: F)
+    where
+        F: FnOnce(&mut Cicr) -> &mut Cicr,
+    {
+        let mut c = Cicr::new();
+
+        op(&mut c);
+
+        self.rcc.cicr.write(|w| unsafe { w.bits(c.0) });
+    }
+
+    pub fn csr<F>(&mut self, op: F) -> Result<(), Error>
+    where
+        F: for<'w> FnOnce(&CsrR, &'w mut CsrW) -> &'w mut CsrW,
+    {
+        let r = CsrR::read_from(&self.rcc);
+        let mut wc = CsrW(r.0);
+
+        op(&r, &mut wc);
+
+        if wc._lsi2trim() != r.lsi2trim() && r.lsi2on() {
+            return Err(Error::ClockInUse);
+        }
+
+        self.rcc.csr.modify(|_, w| unsafe { w.bits(wc.0) });
+
+        Ok(())
+    }
+
+    pub fn csr_read(&self) -> CsrR {
+        CsrR::read_from(&self.rcc)
+    }
+
     pub fn smps_cr<F>(&self, op: F) -> Result<(), Error>
     where
         F: for<'w> FnOnce(&SmpsCrR, &'w mut SmpsCrW) -> &'w mut SmpsCrW,
@@ -724,6 +799,94 @@ config_reg_u32! {
     W, SmpsCrW, RCC, smpscr, [
         smpssel => (_smpssel, Smpssel, u8, [1:0], "SMPS step-down converter clock selection"),
         smpsdiv => (_smpsdiv, Smpsdiv, u8, [5:4], "SMPS step-down converter clock prescaler"),
+    ]
+}
+
+config_reg_u32! {
+    RW, CierR, CierW, RCC, cier, [
+        lsi1rdyie => (_lsi1rdyie, bool, bool, [0:0], "LSI1 ready interrupt enable"),
+        lserdyie => (_lserdyie, bool, bool, [1:1], "LSE ready interrupt enable"),
+        msirdyie => (_msirdyie, bool, bool, [2:2], "MSI ready interrupt enable"),
+        hsirdyie => (_hsirdyie, bool, bool, [3:3], "HSI16 ready interrupt enable"),
+        hserdyie => (_hserdyie, bool, bool, [4:4], "HSE ready interrupt enable"),
+        pllrdyie => (_pllrdyie, bool, bool, [5:5], "PLL ready interrupt enable"),
+        pllsai1rdyie => (_pllsai1rdyie, bool, bool, [6:6], "PLLSAI1 ready interrupt enable"),
+        lsecssie => (_lsecssie, bool, bool, [9:9], "LSE clock security system interrupt enable"),
+        hsi48rdyie => (_hsi48rdyie, bool, bool, [10:10], "HSI48 ready interrupt enable"),
+        lsi2rdyie => (_lsi2rdyie, bool, bool, [11:11], "LSI2 ready interrupt enable"),
+    ]
+}
+
+clear_status_reg_u32! {
+    Cicr, [
+        lsi1rdyc => (0, "LSI1 ready interrupt clear"),
+        lserdyc => (1, "LSE ready interrupt clear"),
+        msirdyc => (2, "MSI ready interrupt clear"),
+        hsirdyc => (3, "HSI16 ready interrupt clear"),
+        hserdyc => (4, "HSE ready interrupt clear"),
+        pllrdyc => (5, "PLL ready interrupt clear"),
+        pllsai1rdyc => (6, "PLLSAI1 ready interrupt clear"),
+        lsecssc => (9, "LSE clock security system interrupt clear"),
+        hsi48rdyc => (10, "HSI48 ready interrupt clear"),
+        lsi2rdyc => (11, "LSI2 ready interrupt clear"),
+    ]
+}
+
+config_reg_u32! {
+    R, CsrR, RCC, csr, [
+        lsi1on => (bool, bool, [0:0], "LSI1 oscillator enable"),
+        lsi1rdy => (bool, bool, [1:1], "LSI1 oscillator ready"),
+        lsi2on => (bool, bool, [2:2], "LSI2 oscillator enable and selection\n\n\
+            - `false`: LSI2 oscillator off (LSI1 selected on LSI)\n\
+            - `true`: LSI2 oscillator on (LSI2 when ready selected on LSI)
+        "),
+        lsi2rdy => (bool, bool, [3:3], "LSI2 oscillator ready"),
+        lsi2trim => (u8, u8, [11:8], "LSI2 oscillator trim\n\n\
+            Note: LSI2TRIM must be changed only when LSI2 is disabled
+        "),
+        rfwkpsel => (Rfwkpsel, u8, [15:14], "RF system wakeup clock source selection"),
+        rfrsts => (bool, bool, [16:16], "Radio system BLE and 802.15.4 reset status\n\n\
+            - `false`: Radio system BLE and 802.15.4 not in reset, radio system can be accessed\n\
+            - `true`: Radio system BLE and 802.15.4 under reset, radio system cannot be accessed
+        "),
+        oblrstf => (bool, bool, [25:25], "Option byte loader reset flag\n\n\
+            Cleared by writing to the RMVF bit
+        "),
+        pinrstf => (bool, bool, [26:26], "Pin reset flag\n\n\
+            Cleared by writing to the RMVF bit
+        "),
+        borrstf => (bool, bool, [27:27], "BOR flag\n\n\
+            Cleared by writing to the RMVF bit
+        "),
+        sftrstf => (bool, bool, [28:28], "Software reset flag\n\n\
+            Cleared by writing to the RMVF bit
+        "),
+        iwdgrstf => (bool, bool, [29:29], "Independent window watchdog reset flag\n\n\
+            Cleared by writing to the RMVF bit
+        "),
+        wwdgrstf => (bool, bool, [30:30], "Window watchdog reset flag\n\n\
+            Cleared by writing to the RMVF bit
+        "),
+        lpwrrstf => (bool, bool, [31:31], "Low power reset flag\n\n\
+            Cleared by writing to the RMVF bit\n\n\
+            - `false`: No illegal mode reset occured\n\
+            - `true` Illegal mode reset occured
+        "),
+    ]
+}
+
+config_reg_u32! {
+    W, CsrW, RCC, csr, [
+        lsi1on => (_lsi1on, bool, bool, [0:0], "LSI1 oscillator enable"),
+        lsi2on => (_lsi2on, bool, bool, [2:2], "LSI2 oscillator enable and selection\n\n\
+            - `false`: LSI2 oscillator off (LSI1 selected on LSI)\n\
+            - `true`: LSI2 oscillator on (LSI2 when ready selected on LSI)
+        "),
+        lsi2trim => (_lsi2trim, u8, u8, [11:8], "LSI2 oscillator trim\n\n\
+            Note: LSI2TRIM must be changed only when LSI2 is disabled
+        "),
+        rfwkpsel => (_rfwkpsel, Rfwkpsel, u8, [15:14], "RF system wakeup clock source selection"),
+        rmvw => (_rmvw, bool, bool, [23:23], "Remove reset flag"),
     ]
 }
 
@@ -1149,6 +1312,17 @@ pub enum Smpsdiv {
     /// - MSI (48 MHz) => 6 (4 MHz)
     /// - HSE (32 MHz) => 4 (4 MHz)
     S4MHz = 0b01,
+}
+
+/// RF system wakeup clock source selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum Rfwkpsel {
+    NoClock = 0b00,
+    /// LSE oscillator clock used as RF system wakeup clock
+    Lse = 0b01,
+    /// HSEoscillator clock divided by 1024 used as RF system wakeup clock
+    Hse = 0b11,
 }
 
 /// MSI Maximum frequency
