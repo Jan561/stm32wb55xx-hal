@@ -1,4 +1,5 @@
 use crate::flash::Latency;
+use crate::pac::rcc;
 use crate::pac::{FLASH, PWR, RCC};
 use crate::pwr::Vos;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
@@ -77,6 +78,10 @@ impl Rcc {
         let mut wc = CrW(r.0);
 
         op(&r, &mut wc);
+
+        if r.0 == wc.0 {
+            return Ok(());
+        }
 
         let cfgr = self.cfg_read();
         let pllcfgr = self.pllcfgr_read();
@@ -322,7 +327,7 @@ impl Rcc {
 
         if current_sysclk < new_sysclk {
             // Increase CPU frequency
-            self.set_flash_latency(new_sysclk);
+            set_flash_latency(&self.rcc, new_sysclk);
         }
 
         self.rcc.cfgr.modify(|_, w| {
@@ -350,7 +355,7 @@ impl Rcc {
 
         if current_sysclk > new_sysclk {
             // Decrease CPU frequency
-            self.set_flash_latency(new_sysclk);
+            set_flash_latency(&self.rcc, new_sysclk);
         }
 
         Ok(())
@@ -360,7 +365,7 @@ impl Rcc {
         CfgrR::read_from(&self.rcc)
     }
 
-    pub fn pllcfgr<F>(&self, op: F) -> Result<(), Error>
+    pub fn pllcfgr<F>(&mut self, op: F) -> Result<(), Error>
     where
         F: for<'w> FnOnce(&PllCfgrR, &'w mut PllCfgrW) -> &'w mut PllCfgrW,
     {
@@ -417,7 +422,7 @@ impl Rcc {
         Pllsai1CfgrR::read_from(&self.rcc)
     }
 
-    pub fn ext_cfg<F>(&self, op: F)
+    pub fn ext_cfg<F>(&mut self, op: F)
     where
         F: for<'w> FnOnce(&ExtCfgrR, &'w mut ExtCfgrW) -> &'w mut ExtCfgrW,
     {
@@ -442,7 +447,7 @@ impl Rcc {
         ExtCfgrR::read_from(&self.rcc)
     }
 
-    pub fn cier<F>(&self, op: F)
+    pub fn cier<F>(&mut self, op: F)
     where
         F: for<'w> FnOnce(&CierR, &'w mut CierW) -> &'w mut CierW,
     {
@@ -516,7 +521,7 @@ impl Rcc {
         CsrR::read_from(&self.rcc)
     }
 
-    pub fn smps_cr<F>(&self, op: F) -> Result<(), Error>
+    pub fn smps_cr<F>(&mut self, op: F) -> Result<(), Error>
     where
         F: for<'w> FnOnce(&SmpsCrR, &'w mut SmpsCrW) -> &'w mut SmpsCrW,
     {
@@ -553,20 +558,6 @@ impl Rcc {
 
     pub fn smps_cr_read(&self) -> SmpsCrR {
         SmpsCrR::read_from(&self.rcc)
-    }
-
-    fn set_flash_latency(&self, clk: u32) {
-        // SAFETY: No safety critical accesses performed
-        let pwr = unsafe { &*PWR::PTR };
-        // SAFETY: No safety critical accesses performed
-        let flash = unsafe { &*FLASH::PTR };
-
-        let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
-
-        let hclk4 = Self::hclk4(clk, &ExtCfgrR::read_from(&self.rcc));
-        let latency = Latency::from(vos, hclk4);
-
-        flash.acr.modify(|_, w| w.latency().variant(latency.into()));
     }
 
     pub fn current_sysclk_hertz(&self) -> u32 {
@@ -623,6 +614,20 @@ impl Rcc {
     fn msi_hertz(cr_r: &CrR) -> u32 {
         cr_r.msirange().hertz()
     }
+}
+
+pub(crate) fn set_flash_latency(rcc: &rcc::RegisterBlock, clk: u32) {
+    // SAFETY: No safety critical accesses performed
+    let pwr = unsafe { &*PWR::PTR };
+    // SAFETY: No safety critical accesses performed
+    let flash = unsafe { &*FLASH::PTR };
+
+    let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+
+    let hclk4 = Rcc::hclk4(clk, &ExtCfgrR::read_from(rcc));
+    let latency = Latency::from(vos, hclk4);
+
+    flash.acr.modify(|_, w| w.latency().variant(latency.into()));
 }
 
 impl Sysclk for &'_ Rcc {

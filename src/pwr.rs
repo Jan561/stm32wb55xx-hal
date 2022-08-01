@@ -47,8 +47,8 @@
 pub mod pxcr;
 
 use crate::pac::pwr::{sr1, sr2};
-use crate::pac::PWR;
-use crate::rcc::Sysclk;
+use crate::pac::{PWR, RCC};
+use crate::rcc;
 use cortex_m::peripheral::SCB;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
@@ -88,6 +88,11 @@ impl Pwr {
 
         let old_vos: Vos = self.pwr.cr1.read().vos().bits().try_into().unwrap();
 
+        if old_vos == Vos::Range1 && range == Vos::Range2 {
+            let rcc = unsafe { &*RCC::PTR };
+            rcc::set_flash_latency(rcc, sysclk);
+        }
+
         self.pwr.cr1.modify(|_, w| w.vos().variant(range.into()));
 
         if old_vos == Vos::Range2 && range == Vos::Range1 {
@@ -108,8 +113,8 @@ impl Pwr {
     ///
     /// After calling the function, the clock speed must not be increased
     /// above 2 MHz.
-    pub fn enter_low_power_run(&self, sysclk: impl Sysclk) -> Result<(), Error> {
-        if sysclk.current_hertz() > 2_000_000 {
+    pub fn enter_low_power_run(&self, sysclk: u32) -> Result<(), Error> {
+        if sysclk > 2_000_000 {
             return Err(Error::SysclkTooHighLpr);
         }
 
@@ -135,8 +140,8 @@ impl Pwr {
     /// # SAFETY
     ///
     /// This method must be called from SRAM
-    pub unsafe fn enter_low_power_run_no_flash(&self, sysclk: impl Sysclk) -> Result<(), Error> {
-        if sysclk.current_hertz() > 2_000_000 {
+    pub unsafe fn enter_low_power_run_no_flash(&self, sysclk: u32) -> Result<(), Error> {
+        if sysclk > 2_000_000 {
             return Err(Error::SysclkTooHighLpr);
         }
 

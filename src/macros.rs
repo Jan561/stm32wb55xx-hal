@@ -55,7 +55,7 @@ macro_rules! config_reg_u32 {
 
         impl $ident_r {
             #[allow(unused)]
-            fn read_from(per: &$per) -> Self {
+            fn read_from(per: &<$per as core::ops::Deref>::Target) -> Self {
                 let bits = per.$reg.read().bits();
                 Self(bits)
             }
@@ -77,7 +77,7 @@ macro_rules! config_reg_u32 {
 
         impl $ident_w {
             #[allow(unused)]
-            fn read_from(per: &$per) -> Self {
+            fn read_from(per: &<$per as core::ops::Deref>::Target) -> Self {
                 let bits = per.$reg.read().bits();
                 Self(bits)
             }
