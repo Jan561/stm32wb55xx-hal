@@ -6,6 +6,7 @@ mod macros;
 
 pub mod cpu;
 pub mod flash;
+pub mod gpio;
 pub mod i2c;
 pub mod prelude;
 pub mod pwr;
