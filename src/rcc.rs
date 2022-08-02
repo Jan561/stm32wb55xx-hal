@@ -1,3 +1,7 @@
+//! RCC Reset and Clock Control
+
+pub mod rec;
+
 use crate::flash::Latency;
 use crate::pac::rcc;
 use crate::pac::{FLASH, PWR, RCC};
@@ -98,13 +102,18 @@ impl Rcc {
 
         // Check if clock shall be disabled but is currently used by sysclk or pll
         if !wc._msion()
-            && (cfgr.sws() == SysclkSwitch::Msi || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Msi))
+            && (cfgr.sw() == SysclkSwitch::Msi
+                || cfgr.sws() == SysclkSwitch::Msi
+                || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Msi))
         {
             return Err(Error::ClockInUse);
         }
 
         // Check if PLL shall be enabled when selected clock source is disabled
-        if pll_rising && cfgr.sws() == SysclkSwitch::Msi && !wc._msion() {
+        if pll_rising
+            && (cfgr.sw() == SysclkSwitch::Msi || cfgr.sws() == SysclkSwitch::Msi)
+            && !(wc._msion() && r.msirdy())
+        {
             return Err(Error::SelectedClockNotEnabled);
         }
 
@@ -112,14 +121,18 @@ impl Rcc {
 
         // Check if clock shall be disabled but is currently used by sysclk or pll
         if !wc._hsion()
-            && (cfgr.sws() == SysclkSwitch::Hsi16
+            && (cfgr.sw() == SysclkSwitch::Hsi16
+                || cfgr.sws() == SysclkSwitch::Hsi16
                 || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Hsi16))
         {
             return Err(Error::ClockInUse);
         }
 
         // Check if PLL shall be enabled when selected clock source is disabled
-        if pll_rising && cfgr.sws() == SysclkSwitch::Hsi16 && !wc._hsion() {
+        if pll_rising
+            && (cfgr.sw() == SysclkSwitch::Hsi16 || cfgr.sws() == SysclkSwitch::Hsi16)
+            && !(wc._hsion() && r.hsirdy())
+        {
             return Err(Error::SelectedClockNotEnabled);
         }
 
@@ -127,20 +140,25 @@ impl Rcc {
 
         // Check if clock shall be disabled but is currently used by sysclk or pll
         if !wc._hseon()
-            && (cfgr.sws() == SysclkSwitch::Hse || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Hse))
+            && (cfgr.sw() == SysclkSwitch::Hse
+                || cfgr.sws() == SysclkSwitch::Hse
+                || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Hse))
         {
             return Err(Error::ClockInUse);
         }
 
         // Check if PLL shall be enabled when selected clock source is disabled
-        if pll_rising && cfgr.sws() == SysclkSwitch::Hse && !wc._hseon() {
+        if pll_rising
+            && (cfgr.sw() == SysclkSwitch::Hse || cfgr.sws() == SysclkSwitch::Hse)
+            && !(wc._hseon() && r.hserdy())
+        {
             return Err(Error::SelectedClockNotEnabled);
         }
 
         // PLL
 
         // Check if clock shall be disabled but is currently used by sysclk
-        if !wc._pllon() && cfgr.sws() == SysclkSwitch::Pll {
+        if !wc._pllon() && (cfgr.sw() == SysclkSwitch::Pll || cfgr.sws() == SysclkSwitch::Pll) {
             return Err(Error::ClockInUse);
         }
 
@@ -238,7 +256,7 @@ impl Rcc {
         }
 
         // New MSIRANGE must be within the VOS limits if used as sysclk
-        if cfgr.sws() == SysclkSwitch::Msi
+        if (cfgr.sw() == SysclkSwitch::Msi || cfgr.sws() == SysclkSwitch::Msi)
             && vos == Vos::Range2
             && MsiRange::R16M < wc._msirange().try_into().unwrap()
         {
@@ -246,7 +264,10 @@ impl Rcc {
         }
 
         // HSEPRE flag must be set if HSE is used as sysclk in VOS Range 2
-        if cfgr.sws() == SysclkSwitch::Hse && vos == Vos::Range2 && !wc._hsepre() {
+        if (cfgr.sw() == SysclkSwitch::Hse || cfgr.sws() == SysclkSwitch::Hse)
+            && vos == Vos::Range2
+            && !wc._hsepre()
+        {
             return Err(Error::SysclkTooHighVosRange2);
         }
 
