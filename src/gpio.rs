@@ -143,9 +143,27 @@ where
     MODE: marker::OutputSpeed,
 {
     pub fn set_speed(&mut self, speed: Speed) {
-        let offset = 2 * N;
-
-        unsafe {}
+        unsafe {
+            (*Gpio::<P>::ptr()).ospeedr.modify(|_, w| match N {
+                0 => w.ospeedr0().variant(speed.into()),
+                1 => w.ospeedr1().variant(speed.into()),
+                2 => w.ospeedr2().variant(speed.into()),
+                3 => w.ospeedr3().variant(speed.into()),
+                4 => w.ospeedr4().variant(speed.into()),
+                5 => w.ospeedr5().variant(speed.into()),
+                6 => w.ospeedr6().variant(speed.into()),
+                7 => w.ospeedr7().variant(speed.into()),
+                8 => w.ospeedr8().variant(speed.into()),
+                9 => w.ospeedr9().variant(speed.into()),
+                10 => w.ospeedr10().variant(speed.into()),
+                11 => w.ospeedr11().variant(speed.into()),
+                12 => w.ospeedr12().variant(speed.into()),
+                13 => w.ospeedr13().variant(speed.into()),
+                14 => w.ospeedr14().variant(speed.into()),
+                15 => w.ospeedr15().variant(speed.into()),
+                _ => unreachable!(),
+            })
+        }
     }
 }
 
@@ -185,6 +203,22 @@ macro_rules! gpio {
             }
         }
     };
+}
+
+struct Gpio<const P: char>;
+
+impl<const P: char> Gpio<P> {
+    const fn ptr() -> *const crate::pac::gpioa::RegisterBlock {
+        match P {
+            'A' => crate::pac::GPIOA::PTR,
+            'B' => crate::pac::GPIOB::PTR as _,
+            'C' => crate::pac::GPIOC::PTR as _,
+            'D' => crate::pac::GPIOD::PTR as _,
+            'E' => crate::pac::GPIOE::PTR as _,
+            'H' => crate::pac::GPIOH::PTR as _,
+            _ => unreachable!(),
+        }
+    }
 }
 
 gpio! {
