@@ -1,8 +1,8 @@
 //! GPIO
 
-// Type States
+pub mod alt;
+pub mod convert;
 
-use crate::rcc::rec;
 use core::marker::PhantomData;
 use embedded_hal::digital::v2::PinState;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
