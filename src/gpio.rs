@@ -4,6 +4,7 @@
 
 use crate::rcc::rec;
 use core::marker::PhantomData;
+use embedded_hal::digital::v2::PinState;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use paste::paste;
 
@@ -49,10 +50,10 @@ impl marker::Interruptable for Input {}
 impl marker::Readable for Input {}
 impl marker::Readable for Output<OpenDrain> {}
 impl marker::Active for Input {}
-impl<OType> marker::OutputSpeed for Output<OType> {}
-impl<const A: u8, OType> marker::OutputSpeed for Alternate<A, OType> {}
 impl<OType> marker::Active for Output<OType> {}
 impl<const A: u8, OType> marker::Active for Alternate<A, OType> {}
+impl<OType> marker::OutputSpeed for Output<OType> {}
+impl<const A: u8, OType> marker::OutputSpeed for Alternate<A, OType> {}
 impl marker::NotAlt for Input {}
 impl<OType> marker::NotAlt for Output<OType> {}
 impl marker::NotAlt for Analog {}
@@ -162,8 +163,203 @@ where
                 14 => w.ospeedr14().variant(speed.into()),
                 15 => w.ospeedr15().variant(speed.into()),
                 _ => unreachable!(),
-            })
+            });
         }
+    }
+}
+
+impl<const P: char, const N: u8, MODE> Pin<P, N, MODE>
+where
+    MODE: marker::Active,
+{
+    pub fn set_internal_resistor(&mut self, resistor: Pull) {
+        unsafe {
+            (*Gpio::<P>::ptr()).pupdr.modify(|_, w| match N {
+                0 => w.pupdr0().variant(resistor.into()),
+                1 => w.pupdr0().variant(resistor.into()),
+                2 => w.pupdr0().variant(resistor.into()),
+                3 => w.pupdr0().variant(resistor.into()),
+                4 => w.pupdr0().variant(resistor.into()),
+                5 => w.pupdr0().variant(resistor.into()),
+                6 => w.pupdr0().variant(resistor.into()),
+                7 => w.pupdr0().variant(resistor.into()),
+                8 => w.pupdr0().variant(resistor.into()),
+                9 => w.pupdr0().variant(resistor.into()),
+                10 => w.pupdr10().variant(resistor.into()),
+                11 => w.pupdr11().variant(resistor.into()),
+                12 => w.pupdr12().variant(resistor.into()),
+                13 => w.pupdr13().variant(resistor.into()),
+                14 => w.pupdr14().variant(resistor.into()),
+                15 => w.pupdr15().variant(resistor.into()),
+                _ => unreachable!(),
+            });
+        }
+    }
+}
+
+impl<const P: char, const N: u8, MODE> Pin<P, N, MODE> {
+    fn _set_high(&mut self) {
+        unsafe {
+            (*Gpio::<P>::ptr()).bsrr.write(|w| match N {
+                0 => w.bs0().set_bit(),
+                1 => w.bs1().set_bit(),
+                2 => w.bs2().set_bit(),
+                3 => w.bs3().set_bit(),
+                4 => w.bs4().set_bit(),
+                5 => w.bs5().set_bit(),
+                6 => w.bs6().set_bit(),
+                7 => w.bs7().set_bit(),
+                8 => w.bs8().set_bit(),
+                9 => w.bs9().set_bit(),
+                10 => w.bs10().set_bit(),
+                11 => w.bs11().set_bit(),
+                12 => w.bs12().set_bit(),
+                13 => w.bs13().set_bit(),
+                14 => w.bs14().set_bit(),
+                15 => w.bs15().set_bit(),
+                _ => unreachable!(),
+            });
+        }
+    }
+
+    fn _set_low(&mut self) {
+        unsafe {
+            (*Gpio::<P>::ptr()).bsrr.write(|w| match N {
+                0 => w.br0().set_bit(),
+                1 => w.br1().set_bit(),
+                2 => w.br2().set_bit(),
+                3 => w.br3().set_bit(),
+                4 => w.br4().set_bit(),
+                5 => w.br5().set_bit(),
+                6 => w.br6().set_bit(),
+                7 => w.br7().set_bit(),
+                8 => w.br8().set_bit(),
+                9 => w.br9().set_bit(),
+                10 => w.br10().set_bit(),
+                11 => w.br11().set_bit(),
+                12 => w.br12().set_bit(),
+                13 => w.br13().set_bit(),
+                14 => w.br14().set_bit(),
+                15 => w.br15().set_bit(),
+
+                _ => unreachable!(),
+            });
+        }
+    }
+
+    fn _is_set_low(&self) -> bool {
+        unsafe {
+            let r = (*Gpio::<P>::ptr()).odr.read();
+
+            match N {
+                0 => r.odr0().bit(),
+                1 => r.odr1().bit(),
+                2 => r.odr2().bit(),
+                3 => r.odr3().bit(),
+                4 => r.odr4().bit(),
+                5 => r.odr5().bit(),
+                6 => r.odr6().bit(),
+                7 => r.odr7().bit(),
+                8 => r.odr8().bit(),
+                9 => r.odr9().bit(),
+                10 => r.odr10().bit(),
+                11 => r.odr11().bit(),
+                12 => r.odr12().bit(),
+                13 => r.odr13().bit(),
+                14 => r.odr14().bit(),
+                15 => r.odr15().bit(),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn _is_low(&self) -> bool {
+        unsafe {
+            let r = (*Gpio::<P>::ptr()).idr.read();
+
+            match N {
+                0 => r.idr0().bit(),
+                1 => r.idr1().bit(),
+                2 => r.idr2().bit(),
+                3 => r.idr3().bit(),
+                4 => r.idr4().bit(),
+                5 => r.idr5().bit(),
+                6 => r.idr6().bit(),
+                7 => r.idr7().bit(),
+                8 => r.idr8().bit(),
+                9 => r.idr9().bit(),
+                10 => r.idr10().bit(),
+                11 => r.idr11().bit(),
+                12 => r.idr12().bit(),
+                13 => r.idr13().bit(),
+                14 => r.idr14().bit(),
+                15 => r.idr15().bit(),
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+impl<const P: char, const N: u8, MODE> Pin<P, N, Output<MODE>> {
+    #[inline(always)]
+    pub fn set_high(&mut self) {
+        self._set_high();
+    }
+
+    #[inline(always)]
+    pub fn set_low(&mut self) {
+        self._set_low();
+    }
+
+    #[inline(always)]
+    pub fn get_state(&self) -> PinState {
+        if self._is_set_low() {
+            PinState::Low
+        } else {
+            PinState::High
+        }
+    }
+
+    #[inline(always)]
+    pub fn set_state(&mut self, state: PinState) {
+        match state {
+            PinState::Low => self.set_low(),
+            PinState::High => self.set_high(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn is_set_high(&self) -> bool {
+        !self.is_set_low()
+    }
+
+    #[inline(always)]
+    pub fn is_set_low(&self) -> bool {
+        self._is_set_low()
+    }
+
+    #[inline(always)]
+    pub fn toggle(&mut self) {
+        if self.is_set_high() {
+            self.set_low();
+        } else {
+            self.set_high();
+        }
+    }
+}
+
+impl<const P: char, const N: u8, MODE> Pin<P, N, MODE>
+where
+    MODE: marker::Readable,
+{
+    #[inline(always)]
+    pub fn is_high(&self) -> bool {
+        !self.is_low()
+    }
+
+    #[inline(always)]
+    pub fn is_low(&self) -> bool {
+        self._is_low()
     }
 }
 
