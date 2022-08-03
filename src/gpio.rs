@@ -2,9 +2,10 @@
 
 // Type States
 
+use crate::rcc::rec;
 use core::marker::PhantomData;
-
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use paste::paste;
 
 pub struct Alternate<const A: u8, OType = PushPull>(PhantomData<OType>);
 
@@ -39,6 +40,8 @@ mod marker {
     pub trait Active {}
     /// Marker trait for all pin modes except alternate
     pub trait NotAlt {}
+    /// Marker trait for pins with alternate function `A` mapping
+    pub trait IntoAf<const A: u8> {}
 }
 
 impl<MODE> marker::Interruptable for Output<MODE> {}
@@ -105,6 +108,12 @@ pub trait PinExt {
     fn port_id(&self) -> u8;
 }
 
+pub trait GpioExt {
+    type Parts;
+
+    fn split(self) -> Self::Parts;
+}
+
 pub struct Pin<const P: char, const N: u8, MODE = Analog> {
     _mode: PhantomData<MODE>,
 }
@@ -141,11 +150,141 @@ where
 }
 
 macro_rules! gpio {
-    ($GPIOX:ident, $gpiox:ident, $Rec:ident, $PEPin:ident, $port_id:expr, $PXn:ident, [
-        $($PXi:ident: ($pxi:ident, $i:expr $(, $MODE:ty)?),)*
+    ($GPIOX:ident, $port_id:expr, [
+        $($PXi:ident: ($i:expr, [$($A:literal),*] $(, $MODE:ty)?),)*
     ]) => {
-        pub mod $gpiox {
-            use crate::pac::$GPIOX;
+        paste! {
+            pub mod [<$GPIOX:lower>] {
+                use crate::pac::$GPIOX;
+                use crate::rcc::rec;
+
+                pub struct Parts {
+                    $(
+                        pub [<$PXi:lower>]: $PXi $(<$MODE>)?,
+                    )*
+                }
+
+                impl super::GpioExt for $GPIOX {
+                    type Parts = Parts;
+
+                    fn split(self) -> Parts {
+                        rec::$GPIOX::enable();
+                        rec::$GPIOX::reset();
+
+                        Parts {
+                            $(
+                                [<$PXi:lower>]: $PXi::new(),
+                            )*
+                        }
+                    }
+                }
+
+                $(
+                    pub type $PXi<MODE = super::Input> = super::Pin<$port_id, $i, MODE>;
+                )*
+            }
         }
     };
+}
+
+gpio! {
+    GPIOA, 'A', [
+        PA0: (0, [1, 12, 13, 14, 15]),
+        PA1: (1, [1, 4, 5, 11, 15]),
+        PA2: (2, [0, 1, 8, 10, 11, 12, 15]),
+        PA3: (3, [1, 3, 8, 10, 11, 13, 15]),
+        PA4: (4, [5, 11, 13, 14, 15]),
+        PA5: (5, [1, 2, 5, 13, 14, 15]),
+        PA6: (6, [1, 5, 8, 10, 11, 12, 14, 15]),
+        PA7: (7, [1, 4, 5, 10, 11, 12, 14, 15]),
+        PA8: (8, [0, 1, 3, 7, 11, 13, 14, 15]),
+        PA9: (9, [1, 3, 4, 5, 7, 11, 13, 15]),
+        PA10: (10, [1, 3, 4, 7, 10, 11, 13, 14, 15]),
+        PA11: (11, [1, 2, 5, 7, 10, 12, 15]),
+        PA12: (12, [1, 5, 7, 8, 10, 15]),
+        PA13: (13, [0, 8, 10, 13, 15]),
+        PA14: (14, [0, 1, 4, 11, 13, 15]),
+        PA15: (15, [0, 1, 2, 5, 6, 11, 15]),
+    ]
+}
+
+gpio! {
+    GPIOB, 'B', [
+        PB0: (0, [6, 12, 15]),
+        PB1: (1, [8, 14, 15]),
+        PB2: (2, [0, 1, 4, 5, 11, 13, 15]),
+        PB3: (3, [0, 1, 5, 7, 11, 13, 15]),
+        PB4: (4, [0, 4, 5, 7, 9, 11, 13, 14, 15]),
+        PB5: (5, [1, 4, 5, 7, 8, 9, 11, 12, 13, 14, 15]),
+        PB6: (6, [0, 1, 4, 7, 9, 11, 13, 14, 15]),
+        PB7: (7, [1, 3, 4, 7, 9, 11, 14, 15]),
+        PB8: (8, [1, 3, 4, 10, 11, 13, 14, 15]),
+        PB9: (9, [1, 3, 4, 5, 8, 9, 10, 11, 13, 14, 15]),
+        PB10: (10, [1, 4, 5, 8, 9, 10, 11, 12, 13, 15]),
+        PB11: (11, [1, 4, 8, 10, 11, 12, 15]),
+        PB12: (12, [1, 3, 4, 5, 8, 9, 11, 13, 15]),
+        PB13: (13, [1, 4, 5, 8, 9, 11, 13, 15]),
+        PB14: (14, [1, 4, 5, 9, 11, 13, 15]),
+        PB15: (15, [0, 1, 5, 9, 11, 13, 15]),
+    ]
+}
+
+gpio! {
+    GPIOC, 'C', [
+        PC0: (0, [1, 4, 8, 11, 14, 15]),
+        PC1: (1, [1, 3, 4, 8, 11, 15]),
+        PC2: (2, [1, 5, 11, 15]),
+        PC3: (3, [1, 3, 5, 11, 13, 14, 15]),
+        PC4: (4, [11, 15]),
+        PC5: (5, [3, 11, 15]),
+        PC6: (6, [9, 11, 15]),
+        PC7: (7, [9, 11, 15]),
+        PC8: (8, [9, 11, 15]),
+        PC9: (9, [3, 9, 10, 11, 13, 15]),
+        PC10: (10, [0, 9, 11, 15]),
+        PC11: (11, [9, 11, 15]),
+        PC12: (12, [0, 6, 9, 11, 15]),
+        PC13: (13, [15]),
+        PC14: (14, [15]),
+        PC15: (15, [15]),
+    ]
+}
+
+gpio! {
+    GPIOD, 'D', [
+        PD0: (0, [5, 15]),
+        PD1: (1, [5, 15]),
+        PD2: (2, [0, 9, 11, 15]),
+        PD3: (3, [3, 5, 10, 15]),
+        PD4: (4, [5, 9, 10, 15]),
+        PD5: (5, [9, 10, 13, 15]),
+        PD6: (6, [3, 9, 10, 13, 15]),
+        PD7: (7, [9, 10, 11, 15]),
+        PD8: (8, [2, 11, 15]),
+        PD9: (9, [0, 11, 15]),
+        PD10: (10, [0, 9, 11, 15]),
+        PD11: (11, [9, 11, 14, 15]),
+        PD12: (12, [9, 11, 14, 15]),
+        PD13: (13, [9, 11, 14, 15]),
+        PD14: (14, [1, 11, 15]),
+        PD15: (15, [1, 11, 15]),
+    ]
+}
+
+gpio! {
+    GPIOE, 'E', [
+        PE0: (0, [1, 9, 11, 14, 15]),
+        PE1: (1, [9, 11, 14, 15]),
+        PE2: (2, [0, 3, 9, 11, 13, 15]),
+        PE3: (3, [15]),
+        PE4: (4, [15]),
+    ]
+}
+
+gpio! {
+    GPIOH, 'H', [
+        PH0: (0, [15]),
+        PH1: (1, [15]),
+        PH3: (3, [0, 15]),
+    ]
 }
