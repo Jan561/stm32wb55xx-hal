@@ -147,9 +147,7 @@ macro_rules! rec {
         paste! {
             $(
                 $(#[$meta])?
-                pub struct $p {
-                    _marker: PhantomData<*const ()>,
-                }
+                pub struct $p;
 
                 $(#[$meta])?
                 enable!($p => ($AXBn, [<$p:lower en>]));
