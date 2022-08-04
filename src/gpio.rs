@@ -176,15 +176,15 @@ where
         unsafe {
             (*Gpio::<P>::ptr()).pupdr.modify(|_, w| match N {
                 0 => w.pupdr0().variant(resistor.into()),
-                1 => w.pupdr0().variant(resistor.into()),
-                2 => w.pupdr0().variant(resistor.into()),
-                3 => w.pupdr0().variant(resistor.into()),
-                4 => w.pupdr0().variant(resistor.into()),
-                5 => w.pupdr0().variant(resistor.into()),
-                6 => w.pupdr0().variant(resistor.into()),
-                7 => w.pupdr0().variant(resistor.into()),
-                8 => w.pupdr0().variant(resistor.into()),
-                9 => w.pupdr0().variant(resistor.into()),
+                1 => w.pupdr1().variant(resistor.into()),
+                2 => w.pupdr2().variant(resistor.into()),
+                3 => w.pupdr3().variant(resistor.into()),
+                4 => w.pupdr4().variant(resistor.into()),
+                5 => w.pupdr5().variant(resistor.into()),
+                6 => w.pupdr6().variant(resistor.into()),
+                7 => w.pupdr7().variant(resistor.into()),
+                8 => w.pupdr8().variant(resistor.into()),
+                9 => w.pupdr9().variant(resistor.into()),
                 10 => w.pupdr10().variant(resistor.into()),
                 11 => w.pupdr11().variant(resistor.into()),
                 12 => w.pupdr12().variant(resistor.into()),
@@ -241,7 +241,6 @@ impl<const P: char, const N: u8, MODE> Pin<P, N, MODE> {
                 13 => w.br13().set_bit(),
                 14 => w.br14().set_bit(),
                 15 => w.br15().set_bit(),
-
                 _ => unreachable!(),
             });
         }
