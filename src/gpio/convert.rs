@@ -47,6 +47,23 @@ impl<const A: u8> PinMode for Alternate<A, PushPull> {
     const AFR: Option<u8> = Some(A);
 }
 
+mod marker {
+    pub trait Convertable<MODE> {}
+}
+
+impl<const P: char, const N: u8, MODE> marker::Convertable<Input> for Pin<P, N, MODE> {}
+impl<const P: char, const N: u8, MODE, OType> marker::Convertable<Output<OType>>
+    for Pin<P, N, MODE>
+{
+}
+impl<const P: char, const N: u8, MODE> marker::Convertable<Analog> for Pin<P, N, MODE> {}
+impl<const P: char, const N: u8, MODE, const A: u8, OType> marker::Convertable<Alternate<A, OType>>
+    for Pin<P, N, MODE>
+where
+    Self: super::marker::IntoAf<A>,
+{
+}
+
 impl<const P: char, const N: u8, MODE: PinMode> Pin<P, N, MODE> {
     fn _set_mode<M: PinMode>(&mut self) {
         unsafe {
@@ -129,7 +146,52 @@ impl<const P: char, const N: u8, MODE: PinMode> Pin<P, N, MODE> {
     }
 
     #[inline(always)]
-    pub fn into_mode<M: PinMode>(mut self) -> Pin<P, N, M> {
+    pub fn into_input_mode(self) -> Pin<P, N, Input> {
+        self.into_mode()
+    }
+
+    #[inline(always)]
+    pub fn into_floating_input(self) -> Pin<P, N, Input> {
+        self.into_mode().internal_resistor(Pull::Floating)
+    }
+
+    #[inline(always)]
+    pub fn into_pull_up_input(self) -> Pin<P, N, Input> {
+        self.into_mode().internal_resistor(Pull::Up)
+    }
+
+    #[inline(always)]
+    pub fn into_pull_down_input(self) -> Pin<P, N, Input> {
+        self.into_mode().internal_resistor(Pull::Down)
+    }
+
+    #[inline(always)]
+    pub fn into_open_drain_output(self) -> Pin<P, N, Output<OpenDrain>> {
+        self.into_mode()
+    }
+
+    #[inline(always)]
+    pub fn into_open_drain_output_in_state(
+        mut self,
+        initial_state: PinState,
+    ) -> Pin<P, N, Output<OpenDrain>> {
+        self._set_state(initial_state);
+        self.into_mode()
+    }
+
+    /// Configures the pin to operate as an push pull output pin
+    /// Initial state will be low
+    #[inline(always)]
+    pub fn into_push_pull_output(mut self) -> Pin<P, N, Output<PushPull>> {
+        self._set_low();
+        self.into_mode()
+    }
+
+    #[inline(always)]
+    pub fn into_mode<M: PinMode>(mut self) -> Pin<P, N, M>
+    where
+        Self: marker::Convertable<M>,
+    {
         self._set_mode::<M>();
         Pin::new()
     }

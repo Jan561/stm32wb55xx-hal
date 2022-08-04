@@ -166,6 +166,12 @@ where
             });
         }
     }
+
+    #[inline(always)]
+    pub fn speed(mut self, speed: Speed) -> Self {
+        self.set_speed(speed);
+        self
+    }
 }
 
 impl<const P: char, const N: u8, MODE> Pin<P, N, MODE>
@@ -195,9 +201,23 @@ where
             });
         }
     }
+
+    #[inline(always)]
+    pub fn internal_resistor(mut self, resistor: Pull) -> Self {
+        self.set_internal_resistor(resistor);
+        self
+    }
 }
 
 impl<const P: char, const N: u8, MODE> Pin<P, N, MODE> {
+    #[inline(always)]
+    fn _set_state(&mut self, state: PinState) {
+        match state {
+            PinState::Low => self._set_low(),
+            PinState::High => self._set_high(),
+        }
+    }
+
     fn _set_high(&mut self) {
         unsafe {
             (*Gpio::<P>::ptr()).bsrr.write(|w| match N {
