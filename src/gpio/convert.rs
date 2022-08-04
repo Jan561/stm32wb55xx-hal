@@ -180,6 +180,7 @@ impl<const P: char, const N: u8, MODE: PinMode> Pin<P, N, MODE> {
     }
 
     /// Configures the pin to operate as an push pull output pin
+    ///
     /// Initial state will be low
     #[inline(always)]
     pub fn into_push_pull_output(mut self) -> Pin<P, N, Output<PushPull>> {

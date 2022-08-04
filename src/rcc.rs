@@ -569,6 +569,24 @@ impl Rcc {
         CsrR::read_from(&self.rcc)
     }
 
+    pub fn ccip<F>(&mut self, op: F)
+    where
+        F: for<'w> FnOnce(&CcipR, &'w mut CcipW) -> &'w mut CcipW,
+    {
+        let r = CcipR::read_from(&self.rcc);
+        let mut wc = CcipW(r.0);
+
+        op(&r, &mut wc);
+
+        unsafe {
+            self.rcc.ccipr.modify(|_, w| w.bits(wc.0));
+        }
+    }
+
+    pub fn ccip_read(&self) -> CcipR {
+        CcipR::read_from(&self.rcc)
+    }
+
     pub fn smps_cr<F>(&mut self, op: F) -> Result<(), Error>
     where
         F: for<'w> FnOnce(&SmpsCrR, &'w mut SmpsCrW) -> &'w mut SmpsCrW,
@@ -940,6 +958,21 @@ config_reg_u32! {
         "),
         rfwkpsel => (_rfwkpsel, Rfwkpsel, u8, [15:14], "RF system wakeup clock source selection"),
         rmvw => (_rmvw, bool, bool, [23:23], "Remove reset flag"),
+    ]
+}
+
+config_reg_u32! {
+    RW, CcipR, CcipW, RCC, ccipr, [
+        usart1sel => (_usart1sel, Usart1sel, u8, [1:0], "USART1 clock source selection"),
+        lpuart1sel => (_lpuart1sel, Usart1sel, u8, [11:10], "LPUART1 clock source selection"),
+        i2c1sel => (_i2c1sel, I2cSel, u8, [13:12], "I2C1 clock source selection"),
+        i2c3sel => (_i2c3sel, I2cSel, u8, [17:16], "I2C3 clock source selection"),
+        lptim1sel => (_lptim1sel, LptimSel, u8, [19:18], "Low power timer 1 clock source selection"),
+        lptim2sel => (_lptim2sel, LptimSel, u8, [21:20], "Low power timer 2 clock source selection"),
+        sai1sel => (_sai1sel, Sai1Sel, u8, [23:22], "SAI1 clock source selection"),
+        clk48sel => (_clk48sel, Clk48Sel, u8, [27:26], "48 MHz clock source selection"),
+        adcsel => (_adcsel, AdcSel, u8, [29:28], "ADC clock source selection"),
+        rngsel => (_rngsel, RngSel, u8, [31:30], "RNG clock source selection"),
     ]
 }
 
@@ -1376,6 +1409,67 @@ pub enum Rfwkpsel {
     Lse = 0b01,
     /// HSEoscillator clock divided by 1024 used as RF system wakeup clock
     Hse = 0b11,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum Usart1sel {
+    Pclk = 0b00,
+    Sysclk = 0b01,
+    Hsi16 = 0b10,
+    Lse = 0b11,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum I2cSel {
+    Pclk = 0b00,
+    Sysclk = 0b01,
+    Hsi16 = 0b10,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum LptimSel {
+    Pclk = 0b00,
+    Lsi = 0b01,
+    Hsi16 = 0b10,
+    Lse = 0b11,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum Sai1Sel {
+    PllsaiP = 0b00,
+    PllP = 0b01,
+    Hsi16 = 0b10,
+    Ext = 0b11,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum Clk48Sel {
+    Hsi48 = 0b00,
+    PllsaiQ = 0b01,
+    PllQ = 0b10,
+    Msi = 0b11,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum AdcSel {
+    NoClock = 0b00,
+    PllsaiR = 0b01,
+    PllP = 0b10,
+    Sysclk = 0b11,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[repr(u8)]
+pub enum RngSel {
+    Clk48 = 0b00,
+    Lsi = 0b01,
+    Lse = 0b10,
 }
 
 /// MSI Maximum frequency
