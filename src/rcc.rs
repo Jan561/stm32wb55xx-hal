@@ -653,6 +653,22 @@ impl Rcc {
         }
     }
 
+    pub fn current_hclk1(&self) -> u32 {
+        let sysclk = self.current_sysclk_hertz();
+
+        Self::hclk1(sysclk, &self.cfg_read())
+    }
+
+    fn hclk1(sysclk: u32, cfgr: &CfgrR) -> u32 {
+        if cfgr.hpref() {
+            let hpre = cfgr.hpre().div_scale() as u32;
+
+            sysclk / hpre
+        } else {
+            sysclk
+        }
+    }
+
     pub fn current_hclk2(&self) -> u32 {
         let sysclk = self.current_sysclk_hertz();
 
@@ -675,6 +691,42 @@ impl Rcc {
         let prescaler = u8::from(ext.shdhpre()) as u32;
 
         sysclk / prescaler
+    }
+
+    pub fn current_pclk1(&self) -> u32 {
+        let sysclk = self.current_sysclk_hertz();
+
+        Self::pclk1(sysclk, &self.cfg_read())
+    }
+
+    fn pclk1(sysclk: u32, cfgr: &CfgrR) -> u32 {
+        let hclk1 = Self::hclk1(sysclk, cfgr);
+
+        if cfgr.ppre1f() {
+            let ppre1 = cfgr.ppre1().div_scale() as u32;
+
+            hclk1 / ppre1
+        } else {
+            hclk1
+        }
+    }
+
+    pub fn current_pclk2(&self) -> u32 {
+        let sysclk = self.current_sysclk_hertz();
+
+        Self::pclk2(sysclk, &self.cfg_read())
+    }
+
+    fn pclk2(sysclk: u32, cfgr: &CfgrR) -> u32 {
+        let hclk1 = Self::hclk1(sysclk, cfgr);
+
+        if cfgr.ppre2f() {
+            let ppre2 = cfgr.ppre2().div_scale() as u32;
+
+            hclk1 / ppre2
+        } else {
+            hclk1
+        }
     }
 
     fn msi_hertz(cr_r: &CrR) -> u32 {

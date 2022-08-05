@@ -416,6 +416,10 @@ macro_rules! gpio {
                     pub type $PXi<MODE = super::Input> = super::Pin<$port_id, $i, MODE>;
                 )*
             }
+
+            $(
+                pub use [<$GPIOX:lower>]::$PXi;
+            )*
         }
     };
 }

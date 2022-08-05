@@ -1,5 +1,6 @@
 #![no_std]
 #![feature(never_type)]
+#![feature(associated_const_equality)]
 
 #[macro_use]
 mod macros;
