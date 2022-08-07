@@ -6,6 +6,8 @@ use crate::flash::Latency;
 use crate::pac::rcc;
 use crate::pac::{FLASH, PWR, RCC};
 use crate::pwr::Vos;
+use crate::time::Hertz;
+use fugit::RateExtU32;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 use sealed::sealed;
 use stm32wb::stm32wb55::rcc::cifr;
@@ -63,10 +65,6 @@ pub trait LPEnable: RccBus {
 
 pub trait Reset: RccBus {
     fn reset(rcc: &RCC);
-}
-
-pub trait Sysclk {
-    fn current_hertz(self) -> u32;
 }
 
 pub struct Rcc {
@@ -748,9 +746,37 @@ pub(crate) fn set_flash_latency(rcc: &rcc::RegisterBlock, clk: u32) {
     flash.acr.modify(|_, w| w.latency().variant(latency.into()));
 }
 
-impl Sysclk for &'_ Rcc {
-    fn current_hertz(self) -> u32 {
-        self.current_sysclk_hertz()
+pub trait Clocks {
+    fn sysclk(self) -> Hertz;
+    fn hclk1(self) -> Hertz;
+    fn pclk1(self) -> Hertz;
+    fn i2c1_clk(self) -> Hertz;
+    fn i2c3_clk(self) -> Hertz;
+}
+
+impl Clocks for &'_ Rcc {
+    fn sysclk(self) -> Hertz {
+        self.current_sysclk_hertz().Hz()
+    }
+
+    fn hclk1(self) -> Hertz {
+        self.current_hclk1().Hz()
+    }
+
+    fn pclk1(self) -> Hertz {
+        self.current_pclk1().Hz()
+    }
+
+    fn i2c1_clk(self) -> Hertz {
+        0.Hz()
+    }
+
+    fn i2c3_clk(self) -> Hertz {
+        match self.ccip_read().i2c3sel() {
+            I2cSel::Pclk => self.pclk1(),
+            I2cSel::Sysclk => self.sysclk(),
+            I2cSel::Hsi16 => hsi16_hertz().Hz(),
+        }
     }
 }
 

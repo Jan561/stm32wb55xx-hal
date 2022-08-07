@@ -1,4 +1,4 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![feature(never_type)]
 #![feature(associated_const_equality)]
 
@@ -13,5 +13,6 @@ pub mod prelude;
 pub mod pwr;
 pub mod rcc;
 pub mod signature;
+pub mod time;
 
 use stm32wb::stm32wb55 as pac;

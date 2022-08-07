@@ -1,5 +1,7 @@
 use crate::i2c;
+use sealed::sealed;
 
+#[sealed]
 pub trait PinA<PIN, PER> {
     const A: u8;
 }
@@ -8,7 +10,8 @@ macro_rules! pin {
     ($(<$PIN:ty, $PER:ident> for [$($PX:ident<$A:literal>),*]),* $(,)?) => {
         $(
             $(
-                impl PinA<$PIN, crate::pac::$PER> for crate::gpio::$PX {
+                #[sealed]
+                impl PinA<$PIN, crate::pac::$PER> for crate::gpio::$PX<crate::gpio::Alternate<$A>> {
                     const A: u8 = $A;
                 }
             )*
