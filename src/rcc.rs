@@ -1,6 +1,6 @@
 //! RCC Reset and Clock Control
 
-pub mod rec;
+pub(crate) mod rec;
 
 use crate::flash::Latency;
 use crate::pac::rcc;
@@ -747,31 +747,31 @@ pub(crate) fn set_flash_latency(rcc: &rcc::RegisterBlock, clk: u32) {
 }
 
 pub trait Clocks {
-    fn sysclk(self) -> Hertz;
-    fn hclk1(self) -> Hertz;
-    fn pclk1(self) -> Hertz;
-    fn i2c1_clk(self) -> Hertz;
-    fn i2c3_clk(self) -> Hertz;
+    fn sysclk(&self) -> Hertz;
+    fn hclk1(&self) -> Hertz;
+    fn pclk1(&self) -> Hertz;
+    fn i2c1_clk(&self) -> Hertz;
+    fn i2c3_clk(&self) -> Hertz;
 }
 
 impl Clocks for &'_ Rcc {
-    fn sysclk(self) -> Hertz {
+    fn sysclk(&self) -> Hertz {
         self.current_sysclk_hertz().Hz()
     }
 
-    fn hclk1(self) -> Hertz {
+    fn hclk1(&self) -> Hertz {
         self.current_hclk1().Hz()
     }
 
-    fn pclk1(self) -> Hertz {
+    fn pclk1(&self) -> Hertz {
         self.current_pclk1().Hz()
     }
 
-    fn i2c1_clk(self) -> Hertz {
+    fn i2c1_clk(&self) -> Hertz {
         0.Hz()
     }
 
-    fn i2c3_clk(self) -> Hertz {
+    fn i2c3_clk(&self) -> Hertz {
         match self.ccip_read().i2c3sel() {
             I2cSel::Pclk => self.pclk1(),
             I2cSel::Sysclk => self.sysclk(),

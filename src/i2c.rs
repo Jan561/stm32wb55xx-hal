@@ -1,8 +1,8 @@
-use crate::gpio::alt::PinA;
 use crate::pac::{I2C1, I2C3};
 use crate::rcc::{rec, Clocks};
 use crate::time::Hertz;
 use core::cmp::max;
+use core::marker::PhantomData;
 use fugit::RateExtU32;
 use paste::paste;
 use sealed::sealed;
@@ -15,28 +15,43 @@ pub struct Smba;
 pub trait Pins<I2C> {}
 
 #[sealed]
+pub trait SclPin<I2C> {}
+
+#[sealed]
+pub trait SdaPin<I2C> {}
+
+#[sealed]
+pub trait SmbaPin<I2C> {}
+
+#[sealed]
 impl<I2C, SCL, SDA> Pins<I2C> for (SCL, SDA)
 where
-    SCL: PinA<Scl, I2C>,
-    SDA: PinA<Sda, I2C>,
+    SCL: SclPin<I2C>,
+    SDA: SdaPin<I2C>,
 {
 }
 
 pub trait I2cExt: Sized {
-    fn i2c<PINS>(self, pins: PINS, clocks: impl Clocks, frequency: Hertz) -> I2c<Self, PINS>
+    fn i2c<'a, PINS>(
+        self,
+        pins: PINS,
+        clocks: impl Clocks + 'a,
+        frequency: Hertz,
+    ) -> I2c<'a, Self, PINS>
     where
         PINS: Pins<Self>;
 }
 
-pub struct I2c<I2C, PINS> {
+pub struct I2c<'a, I2C, PINS> {
+    _clocks: PhantomData<&'a ()>,
     i2c: I2C,
     pins: PINS,
 }
 
-pub type I2c1<PINS> = I2c<I2C1, PINS>;
-pub type I2c3<PINS> = I2c<I2C3, PINS>;
+pub type I2c1<'a, PINS> = I2c<'a, I2C1, PINS>;
+pub type I2c3<'a, PINS> = I2c<'a, I2C3, PINS>;
 
-impl<I2C, PINS> I2c<I2C, PINS> {
+impl<I2C, PINS> I2c<'_, I2C, PINS> {
     fn timings(i2cclk: Hertz, frequency: Hertz) -> [u8; 5] {
         let ratio = (i2cclk + frequency - 1.Hz()) / frequency;
 
@@ -76,7 +91,9 @@ impl<I2C, PINS> I2c<I2C, PINS> {
             ($min:expr, $tf:expr, $tr:expr, $su:expr, $ticks:expr, $l_weight:expr, $h_weight:expr, $scll_min:expr, $sclh_min:expr) => {{
                 assert!(i2cclk >= $min.MHz::<1, 1>());
 
-                let scl_ratio = ratio - 4;
+                // t_sync,1 and t_sync2 insert an additional delay of > 2 additional clk cycles and > 50 ns for AF each
+                // To account for the first, we subtract 2*2, to account for the second, we subtract 2*50ns*i2cclk
+                let scl_ratio = ratio - 4 - i2cclk.to_kHz() / 10_000;
 
                 let scll_min_ratio = (i2cclk.to_kHz() * $scll_min + 999_999) / 1_000_000;
                 let sclh_min_ratio = (i2cclk.to_kHz() * $sclh_min + 999_999) / 1_000_000;
@@ -88,10 +105,10 @@ impl<I2C, PINS> I2c<I2C, PINS> {
                 let presc = (presc_reg + 1) as u32;
 
                 let scll = ((scl_ratio * $l_weight - 1) / (presc * ($l_weight + $h_weight))) as u8;
-                let scll = max(scll, ((scll_min_ratio + presc - 1) / presc) as u8 - 1);
+                let scll = max(scll, ((scll_min_ratio - 1) / presc) as u8);
 
-                let sclh = ((scl_ratio + presc - 1) / presc - scll as u32).checked_sub(2).unwrap_or(0) as u8;
-                let sclh = max(sclh, ((sclh_min_ratio + presc - 1) / presc) as u8 - 1);
+                let sclh = ((scl_ratio - presc - 1) / presc - scll as u32) as u8;
+                let sclh = max(sclh, ((sclh_min_ratio - 1) / presc) as u8);
 
                 let sdadel = ((sdadel_ratio + presc - 1) / presc) as u8;
                 let scldel = ((scldel_ratio - 1) / presc) as u8;
@@ -114,13 +131,17 @@ macro_rules! i2c {
     ($($I2Cx:ident),* $(,)?) => {
         paste! {
             $(
-                impl<PINS> I2c<$I2Cx, PINS> {
-                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks, frequency: Hertz) -> Self
+                impl<'a, PINS> I2c<'a, $I2Cx, PINS> {
+                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks + 'a, frequency: Hertz) -> Self
                     where
                         PINS: Pins<$I2Cx>,
                     {
                         if frequency > 1.MHz::<1, 1>() {
                             panic!("Maximum allowed frequency is 1 MHz");
+                        }
+
+                        if 4 * clocks.pclk1() < 3 * frequency {
+                            panic!("PCLK1 frequency must be at least 3/4 of SCL frequency");
                         }
 
                         rec::$I2Cx::enable();
@@ -146,15 +167,15 @@ macro_rules! i2c {
                         });
 
                         Self {
+                            _clocks: PhantomData,
                             i2c,
                             pins,
                         }
                     }
-
                 }
 
                 impl I2cExt for $I2Cx {
-                    fn i2c<PINS>(self, pins: PINS, clocks: impl Clocks, frequency: Hertz) -> I2c<$I2Cx, PINS>
+                    fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks + 'a, frequency: Hertz) -> I2c<'a, $I2Cx, PINS>
                     where
                         PINS: Pins<$I2Cx>,
                     {
@@ -167,6 +188,47 @@ macro_rules! i2c {
 }
 
 i2c! { I2C1, I2C3 }
+
+macro_rules! pins {
+    ($($I2Cx:ty: (
+        SCL: [
+            $($scl:ident),*
+        ]
+        SDA: [
+            $($sda:ident),*
+        ]
+    )),*) => {
+        $(
+            $(
+                #[sealed]
+                impl SclPin<$I2Cx> for crate::gpio::$scl<crate::gpio::Alternate<4, crate::gpio::OpenDrain>> {}
+            )*
+            $(
+                #[sealed]
+                impl SdaPin<$I2Cx> for crate::gpio::$sda<crate::gpio::Alternate<4, crate::gpio::OpenDrain>> {}
+            )*
+        )*
+    };
+}
+
+pins! {
+    I2C1: (
+        SCL: [
+            PA9, PB6, PB8
+        ]
+        SDA: [
+            PA10, PB7, PB9
+        ]
+    ),
+    I2C3: (
+        SCL: [
+            PA7, PB10, PB13, PC0
+        ]
+        SDA: [
+            PB4, PB11, PB14, PC1
+        ]
+    )
+}
 
 #[cfg(test)]
 mod test {
@@ -210,11 +272,11 @@ mod test {
             let freq = freq as f32;
 
             // Estimate minimum sync times. Analog filter on, 2 i2c_clk cycles
-            let t_af_min = 50e-9_f32; // Analog filter 50ns. From H7 Datasheet
+            let t_af_min = 50e-9_f32; // Analog filter 50ns. From WB55 Datasheet
             let t_sync1 = t_af_min + 2. * t_i2c_clk;
             let t_sync2 = t_af_min + 2. * t_i2c_clk;
 
-            // See RM0433 Rev 7 Section 47.4.9
+            // See RM0434 Rev 9 Section 32.4.9
             let t_high_low = sclh as f32 + 1. + scll as f32 + 1.;
             let t_scl = t_sync1 + t_sync2 + (t_high_low * presc * t_i2c_clk);
             let f_scl = 1. / t_scl;
@@ -233,7 +295,7 @@ mod test {
             assert!(f_scl <= 1.02 * freq);
 
             // But it should not be too much less than specified
-            assert!(f_scl > 0.8 * freq);
+            assert!(f_scl > 0.9 * freq);
         });
     }
 
@@ -249,9 +311,7 @@ mod test {
             let freq = freq as f32;
             let t_scll = (scll as f32 + 1.) * presc * t_i2c_clk;
 
-            // From I2C Specification Table 10
-            //
-            // UM10204 rev 6.: https://www.nxp.com/docs/en/user-guide/UM10204.pdf
+            // From RM0434 Rev 9 Table 192
             let t_scll_minimum = match freq {
                 x if x <= 100_000. => 4.7e-6, // Standard mode (Sm)
                 x if x <= 400_000. => 1.3e-6, // Fast mode (Fm)
@@ -276,9 +336,7 @@ mod test {
             let freq = freq as f32;
             let t_sclh = (sclh as f32 + 1.) * presc * t_i2c_clk;
 
-            // From I2C Specification Table 10
-            //
-            // UM10204 rev 6.: https://www.nxp.com/docs/en/user-guide/UM10204.pdf
+            // From RM0434 Rev 9 Table 192
             let t_sclh_minimum = match freq {
                 x if x <= 100_000. => 4e-6,   // Standard mode (Sm)
                 x if x <= 400_000. => 0.6e-6, // Fast mode (Fm)
@@ -302,19 +360,17 @@ mod test {
             let freq = freq as f32;
             let t_sdadel = (sdadel as f32) * presc * t_i2c_clk;
 
-            // From I2C Specification Table 10
-            //
-            // UM10204 rev 6.: https://www.nxp.com/docs/en/user-guide/UM10204.pdf
+            // From RM0434 Rev 9 Table 192
             let t_fall_max = match freq {
                 x if x <= 100_000. => 300e-9, // Standard mode (Sm)
                 x if x <= 400_000. => 300e-9, // Fast mode (Fm)
                 _ => 120e-9,                  // Fast mode Plus (Fm+)
             };
 
-            let t_af_min = 50e-9_f32; // Analog filter min 50ns. From H7 Datasheet
+            let t_af_min = 50e-9_f32; // Analog filter min 50ns. From WB55 Datasheet
             let hddat_min = 0.;
 
-            // From RM0433 Rev 7 Section 47.4.5
+            // From RM0434 Rev 9 Section 32.4.5
             //
             // tSDADEL >= {tf + tHD;DAT(min) - tAF(min) - [(DNF + 3) x tI2CCLK]}
             let t_sdadel_minimim = t_fall_max + hddat_min - t_af_min - (3. * t_i2c_clk);
@@ -345,9 +401,9 @@ mod test {
                 x if x <= 400_000. => 0.9e-6,  // Fast mode (Fm)
                 _ => 0.45e-6,                  // Fast mode Plus (Fm+)
             };
-            let t_af_max = 110e-9_f32; // Analog filter max 80ns. From H7 Datasheet
+            let t_af_max = 110e-9_f32; // Analog filter max 110ns. From WB55 Datasheet
 
-            // From RM0433 Rev 7 Section 47.4.5
+            // From RM0434 Rev 9 Section 32.4.5
             //
             // tSDADEL <= {tHD;DAT(max) - tAF(max) - [(DNF + 4) x tI2CCLK]}
             let t_sdadel_maximum = t_hddat_max - t_af_max - (4. * t_i2c_clk);
@@ -374,9 +430,7 @@ mod test {
             let freq = freq as f32;
             let t_scldel = (scldel as f32) * presc * t_i2c_clk;
 
-            // From I2C Specification Table 10
-            //
-            // UM10204 rev 6.: https://www.nxp.com/docs/en/user-guide/UM10204.pdf
+            // From RM0434 Rev 9 Table 192
             let t_rise_max = match freq {
                 x if x <= 100_000. => 1000e-9, // Standard mode (Sm)
                 x if x <= 400_000. => 300e-9,  // Fast mode (Fm)
@@ -388,7 +442,7 @@ mod test {
                 _ => 50e-9,                   // Fast mode Plus (Fm+)
             };
 
-            // From RM0433 Rev 7 Section 47.4.5
+            // From RM0434 Rev 9 Section 32.4.5
             //
             // tSCLDEL >= tr + tSU;DAT(min)
             let t_scldel_minimum = t_rise_max + t_sudat_min;

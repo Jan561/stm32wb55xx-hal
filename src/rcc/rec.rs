@@ -18,6 +18,7 @@ macro_rules! bus {
 
                 $(#[$meta])?
                 $(
+                    #[allow(unused)]
                     impl $bus {
                         fn enr() -> &'static crate::pac::rcc::[<$AXBn:upper ENR $($n)?>] {
                             let rcc = unsafe { &*RCC::PTR };
@@ -37,6 +38,7 @@ macro_rules! bus {
                 )?
 
                 $(
+                    #[allow(unused)]
                     impl $bus {
                         $(
                             fn enr() -> &'static crate::pac::rcc::$AXBnENR {
@@ -100,6 +102,7 @@ bus! {
 
 macro_rules! enable {
     ($p:ident => ($AXBn:ident, $f:ident)) => {
+        #[allow(unused)]
         impl $p {
             pub fn enable() {
                 let r = $AXBn::enr();
@@ -116,6 +119,7 @@ macro_rules! enable {
 
 macro_rules! sm_enable {
     ($p:ident => ($AXBn:ident, $f:ident)) => {
+        #[allow(unused)]
         impl $p {
             pub fn sm_enable() {
                 let r = $AXBn::smenr();
@@ -132,6 +136,7 @@ macro_rules! sm_enable {
 
 macro_rules! reset {
     ($p:ident => ($AXBn:ident, $f:ident)) => {
+        #[allow(unused)]
         impl $p {
             pub fn reset() {
                 let r = $AXBn::rst();
