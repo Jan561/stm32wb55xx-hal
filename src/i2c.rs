@@ -1,6 +1,6 @@
 use crate::gpio::alt::PinA;
 use crate::pac::{I2C1, I2C3};
-use crate::rcc::Clocks;
+use crate::rcc::{rec, Clocks};
 use crate::time::Hertz;
 use core::cmp::max;
 use fugit::RateExtU32;
@@ -119,10 +119,31 @@ macro_rules! i2c {
                     where
                         PINS: Pins<$I2Cx>,
                     {
-                        Self::timings(clocks.[<$I2Cx:lower _clk>](), frequency);
                         if frequency > 1.MHz::<1, 1>() {
                             panic!("Maximum allowed frequency is 1 MHz");
                         }
+
+                        rec::$I2Cx::enable();
+                        rec::$I2Cx::reset();
+
+                        let [presc, scll, sclh, sdadel, scldel] = Self::timings(clocks.[<$I2Cx:lower _clk>](), frequency);
+
+                        i2c.timingr.modify(|_, w| {
+                            w.presc()
+                                .variant(presc)
+                                .scll()
+                                .variant(scll)
+                                .sclh()
+                                .variant(sclh)
+                                .sdadel()
+                                .variant(sdadel)
+                                .scldel()
+                                .variant(scldel)
+                        });
+
+                        i2c.cr1.modify(|_, w| {
+                            w.anfoff().clear_bit().pe().set_bit()
+                        });
 
                         Self {
                             i2c,
