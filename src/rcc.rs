@@ -746,7 +746,7 @@ pub(crate) fn set_flash_latency(rcc: &rcc::RegisterBlock, clk: u32) {
     flash.acr.modify(|_, w| w.latency().variant(latency.into()));
 }
 
-pub trait Clocks {
+pub trait Clocks<'a> {
     fn sysclk(&self) -> Hertz;
     fn hclk1(&self) -> Hertz;
     fn pclk1(&self) -> Hertz;
@@ -754,7 +754,29 @@ pub trait Clocks {
     fn i2c3_clk(&self) -> Hertz;
 }
 
-impl Clocks for &'_ Rcc {
+impl<'a, T: Clocks<'a>> Clocks<'a> for &'_ T {
+    fn sysclk(&self) -> Hertz {
+        (*self).sysclk()
+    }
+
+    fn hclk1(&self) -> Hertz {
+        (*self).hclk1()
+    }
+
+    fn pclk1(&self) -> Hertz {
+        (*self).pclk1()
+    }
+
+    fn i2c1_clk(&self) -> Hertz {
+        (*self).i2c1_clk()
+    }
+
+    fn i2c3_clk(&self) -> Hertz {
+        (*self).i2c3_clk()
+    }
+}
+
+impl<'a> Clocks<'a> for &'a Rcc {
     fn sysclk(&self) -> Hertz {
         self.current_sysclk_hertz().Hz()
     }
@@ -768,7 +790,11 @@ impl Clocks for &'_ Rcc {
     }
 
     fn i2c1_clk(&self) -> Hertz {
-        0.Hz()
+        match self.ccip_read().i2c1sel() {
+            I2cSel::Pclk => self.pclk1(),
+            I2cSel::Sysclk => self.sysclk(),
+            I2cSel::Hsi16 => hsi16_hertz().Hz(),
+        }
     }
 
     fn i2c3_clk(&self) -> Hertz {
@@ -777,6 +803,36 @@ impl Clocks for &'_ Rcc {
             I2cSel::Sysclk => self.sysclk(),
             I2cSel::Hsi16 => hsi16_hertz().Hz(),
         }
+    }
+}
+
+pub struct Ccdr {
+    sysclk: Hertz,
+    hclk1: Hertz,
+    pclk1: Hertz,
+    i2c1_clk: Hertz,
+    i2c3_clk: Hertz,
+}
+
+impl Clocks<'static> for Ccdr {
+    fn sysclk(&self) -> Hertz {
+        self.sysclk
+    }
+
+    fn hclk1(&self) -> Hertz {
+        self.hclk1
+    }
+
+    fn pclk1(&self) -> Hertz {
+        self.pclk1
+    }
+
+    fn i2c1_clk(&self) -> Hertz {
+        self.i2c1_clk
+    }
+
+    fn i2c3_clk(&self) -> Hertz {
+        self.i2c3_clk
     }
 }
 

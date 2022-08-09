@@ -1,10 +1,11 @@
 //! GPIO
 
-pub mod alt;
+// pub mod alt;
 pub mod convert;
 
+use core::convert::Infallible;
 use core::marker::PhantomData;
-use embedded_hal::digital::v2::PinState;
+use embedded_hal::digital::PinState;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use paste::paste;
 
@@ -436,6 +437,116 @@ impl<const P: char> Gpio<P> {
             'E' => crate::pac::GPIOE::PTR as _,
             'H' => crate::pac::GPIOH::PTR as _,
             _ => unreachable!(),
+        }
+    }
+}
+
+mod hal {
+    use super::convert::PinMode;
+    use super::*;
+    use embedded_hal::digital::blocking::{
+        InputPin, IoPin, OutputPin, StatefulOutputPin, ToggleableOutputPin,
+    };
+    use embedded_hal::digital::ErrorType;
+
+    impl<const P: char, const N: u8, MODE> ErrorType for Pin<P, N, MODE> {
+        type Error = Infallible;
+    }
+
+    impl<const P: char, const N: u8, OType> OutputPin for Pin<P, N, Output<OType>> {
+        #[inline(always)]
+        fn set_low(&mut self) -> Result<(), Self::Error> {
+            self.set_low();
+            Ok(())
+        }
+
+        #[inline(always)]
+        fn set_high(&mut self) -> Result<(), Self::Error> {
+            self.set_high();
+            Ok(())
+        }
+    }
+
+    impl<const P: char, const N: u8, OType> StatefulOutputPin for Pin<P, N, Output<OType>> {
+        #[inline(always)]
+        fn is_set_low(&self) -> Result<bool, Self::Error> {
+            Ok(self.is_set_low())
+        }
+
+        #[inline(always)]
+        fn is_set_high(&self) -> Result<bool, Self::Error> {
+            Ok(self.is_set_high())
+        }
+    }
+
+    impl<const P: char, const N: u8, OType> ToggleableOutputPin for Pin<P, N, Output<OType>> {
+        #[inline(always)]
+        fn toggle(&mut self) -> Result<(), Self::Error> {
+            self.toggle();
+            Ok(())
+        }
+    }
+
+    impl<const P: char, const N: u8, MODE> InputPin for Pin<P, N, MODE>
+    where
+        MODE: marker::Readable,
+    {
+        #[inline(always)]
+        fn is_low(&self) -> Result<bool, Self::Error> {
+            Ok(self.is_low())
+        }
+
+        #[inline(always)]
+        fn is_high(&self) -> Result<bool, Self::Error> {
+            Ok(self.is_high())
+        }
+    }
+
+    impl<const P: char, const N: u8> IoPin<Self, Self> for Pin<P, N, Output<OpenDrain>> {
+        type Error = Infallible;
+
+        fn into_input_pin(self) -> Result<Self, Self::Error> {
+            Ok(self)
+        }
+
+        fn into_output_pin(mut self, state: PinState) -> Result<Self, Self::Error> {
+            self.set_state(state);
+            Ok(self)
+        }
+    }
+
+    impl<const P: char, const N: u8, OType> IoPin<Pin<P, N, Input>, Self> for Pin<P, N, Output<OType>>
+    where
+        Output<OType>: PinMode,
+    {
+        type Error = Infallible;
+
+        fn into_input_pin(self) -> Result<Pin<P, N, Input>, Self::Error> {
+            Ok(self.into_input())
+        }
+
+        fn into_output_pin(mut self, state: PinState) -> Result<Self, Self::Error> {
+            self.set_state(state);
+            Ok(self)
+        }
+    }
+
+    impl<const P: char, const N: u8, OType> IoPin<Self, Pin<P, N, Output<OType>>> for Pin<P, N, Input>
+    where
+        Output<OType>: PinMode,
+    {
+        type Error = Infallible;
+
+        fn into_input_pin(self) -> Result<Self, Self::Error> {
+            Ok(self)
+        }
+
+        fn into_output_pin(
+            mut self,
+            state: PinState,
+        ) -> Result<Pin<P, N, Output<OType>>, Self::Error> {
+            self._set_state(state);
+            Ok(self.into_mode())
         }
     }
 }

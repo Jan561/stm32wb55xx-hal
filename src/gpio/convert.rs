@@ -66,7 +66,7 @@ where
 
 impl<const P: char, const N: u8, MODE: PinMode> Pin<P, N, MODE> {
     #[inline(always)]
-    pub fn into_input_mode(self) -> Pin<P, N, Input> {
+    pub fn into_input(self) -> Pin<P, N, Input> {
         self.into_mode()
     }
 

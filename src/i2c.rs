@@ -1,15 +1,13 @@
 use crate::pac::{I2C1, I2C3};
 use crate::rcc::{rec, Clocks};
 use crate::time::Hertz;
-use core::cmp::max;
+use core::cmp::{max, min};
 use core::marker::PhantomData;
+use embedded_hal::i2c::blocking::Operation;
+use embedded_hal::i2c::{SevenBitAddress, TenBitAddress};
 use fugit::RateExtU32;
 use paste::paste;
 use sealed::sealed;
-
-pub struct Scl;
-pub struct Sda;
-pub struct Smba;
 
 #[sealed]
 pub trait Pins<I2C> {}
@@ -31,11 +29,45 @@ where
 {
 }
 
+const SEVEN_BIT_ADDR_MODE: bool = false;
+const TEN_BIT_ADDR_MODE: bool = true;
+const RD_WRN_WRITE: bool = false;
+const RD_WRN_READ: bool = true;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    Start,
+    Restart,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    Software,
+    Automatic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    Bus,
+    Arbitration,
+    NoAcknowledge(embedded_hal::i2c::NoAcknowledgeSource),
+}
+
+impl embedded_hal::i2c::Error for Error {
+    fn kind(&self) -> embedded_hal::i2c::ErrorKind {
+        match *self {
+            Error::Bus => embedded_hal::i2c::ErrorKind::Bus,
+            Error::Arbitration => embedded_hal::i2c::ErrorKind::ArbitrationLoss,
+            Error::NoAcknowledge(nack) => embedded_hal::i2c::ErrorKind::NoAcknowledge(nack),
+        }
+    }
+}
+
 pub trait I2cExt: Sized {
     fn i2c<'a, PINS>(
         self,
         pins: PINS,
-        clocks: impl Clocks + 'a,
+        clocks: impl Clocks<'a>,
         frequency: Hertz,
     ) -> I2c<'a, Self, PINS>
     where
@@ -43,7 +75,7 @@ pub trait I2cExt: Sized {
 }
 
 pub struct I2c<'a, I2C, PINS> {
-    _clocks: PhantomData<&'a ()>,
+    _phantom: PhantomData<&'a ()>,
     i2c: I2C,
     pins: PINS,
 }
@@ -91,7 +123,7 @@ impl<I2C, PINS> I2c<'_, I2C, PINS> {
             ($min:expr, $tf:expr, $tr:expr, $su:expr, $ticks:expr, $l_weight:expr, $h_weight:expr, $scll_min:expr, $sclh_min:expr) => {{
                 assert!(i2cclk >= $min.MHz::<1, 1>());
 
-                // t_sync,1 and t_sync2 insert an additional delay of > 2 additional clk cycles and > 50 ns for AF each
+                // t_sync1 and t_sync2 insert an additional delay of > 2 additional i2cclk cycles and > 50 ns for AF each
                 // To account for the first, we subtract 2*2, to account for the second, we subtract 2*50ns*i2cclk
                 let scl_ratio = ratio - 4 - i2cclk.to_kHz() / 10_000;
 
@@ -107,6 +139,7 @@ impl<I2C, PINS> I2c<'_, I2C, PINS> {
                 let scll = ((scl_ratio * $l_weight - 1) / (presc * ($l_weight + $h_weight))) as u8;
                 let scll = max(scll, ((scll_min_ratio - 1) / presc) as u8);
 
+                // Maybe we should do a checked subtraction here but tests are ok
                 let sclh = ((scl_ratio - presc - 1) / presc - scll as u32) as u8;
                 let sclh = max(sclh, ((sclh_min_ratio - 1) / presc) as u8);
 
@@ -127,12 +160,16 @@ impl<I2C, PINS> I2c<'_, I2C, PINS> {
     }
 }
 
+impl<I2C, PINS> embedded_hal::i2c::ErrorType for I2c<'_, I2C, PINS> {
+    type Error = Error;
+}
+
 macro_rules! i2c {
     ($($I2Cx:ident),* $(,)?) => {
         paste! {
             $(
                 impl<'a, PINS> I2c<'a, $I2Cx, PINS> {
-                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks + 'a, frequency: Hertz) -> Self
+                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks<'a>, frequency: Hertz) -> Self
                     where
                         PINS: Pins<$I2Cx>,
                     {
@@ -167,15 +204,290 @@ macro_rules! i2c {
                         });
 
                         Self {
-                            _clocks: PhantomData,
+                            _phantom: PhantomData,
                             i2c,
                             pins,
                         }
                     }
+
+                    pub fn free(self) -> ($I2Cx, PINS) {
+                        (self.i2c, self.pins)
+                    }
+                }
+
+                /// Master controller methods
+                impl<PINS> I2c<'_, $I2Cx, PINS> {
+                    pub fn master_read_7(&mut self, addr: SevenBitAddress, len: usize, stop: Stop) {
+                        assert!(addr < 128);
+
+                        let reload = len > 0xFF;
+                        let len = min(0xFF, len);
+
+                        while self.i2c.cr2.read().start().bit_is_set() {}
+
+                        self.i2c.cr2.modify(|_, w| {
+                            w.sadd()
+                                .variant((addr as u16) << 1)
+                                .add10()
+                                .bit(SEVEN_BIT_ADDR_MODE)
+                                .rd_wrn()
+                                .bit(RD_WRN_READ)
+                                .nbytes()
+                                .variant(len as u8)
+                                .reload()
+                                .bit(reload)
+                                .start()
+                                .set_bit()
+                                .autoend()
+                                .bit(stop == Stop::Automatic)
+                        });
+                    }
+
+                    pub fn master_write_7(&mut self, addr: SevenBitAddress, len: usize, stop: Stop) {
+                        assert!(addr < 128);
+
+                        let reload = len > 0xFF;
+                        let len = min(0xFF, len);
+
+                        while self.i2c.cr2.read().start().bit_is_set() {}
+
+                        self.i2c.cr2.modify(|_, w| {
+                            w.sadd()
+                                .variant((addr as u16) << 1)
+                                .add10()
+                                .bit(SEVEN_BIT_ADDR_MODE)
+                                .rd_wrn()
+                                .bit(RD_WRN_WRITE)
+                                .nbytes()
+                                .variant(len as u8)
+                                .reload()
+                                .bit(reload)
+                                .start()
+                                .set_bit()
+                                .autoend()
+                                .bit(stop == Stop::Automatic)
+                        });
+                    }
+
+                    pub fn master_read_10(&mut self, addr: TenBitAddress, len: usize, stop: Stop) {
+                        assert!(addr < 1024);
+
+                        let reload = len > 0xFF;
+                        let len = min(0xFF, len);
+
+                        while self.i2c.cr2.read().start().bit_is_set() {}
+
+                        self.i2c.cr2.modify(|_, w| {
+                            w.sadd()
+                                .variant(addr)
+                                .add10()
+                                .bit(TEN_BIT_ADDR_MODE)
+                                .head10r()
+                                .clear_bit()
+                                .rd_wrn()
+                                .bit(RD_WRN_READ)
+                                .nbytes()
+                                .variant(len as u8)
+                                .reload()
+                                .bit(reload)
+                                .start()
+                                .set_bit()
+                                .autoend()
+                                .bit(stop == Stop::Automatic)
+                        });
+                    }
+
+                    pub fn master_write_10(&mut self, addr: TenBitAddress, len: usize, stop: Stop) {
+                        assert!(addr < 1024);
+
+                        let reload = len > 0xFF;
+                        let len = min(0xFF, len);
+
+                        while self.i2c.cr2.read().start().bit_is_set() {}
+
+                        self.i2c.cr2.modify(|_, w| {
+                            w.sadd()
+                                .variant(addr)
+                                .add10()
+                                .bit(TEN_BIT_ADDR_MODE)
+                                .head10r()
+                                .clear_bit()
+                                .rd_wrn()
+                                .bit(RD_WRN_WRITE)
+                                .nbytes()
+                                .variant(len as u8)
+                                .reload()
+                                .bit(reload)
+                                .start()
+                                .set_bit()
+                                .autoend()
+                                .bit(stop == Stop::Automatic)
+                        });
+                    }
+
+                    pub fn master_restart(&mut self, len: usize, stop: Stop) {
+                        let reload = len > 0xFF;
+                        let len = min(0xFF, len);
+                        let ten_bit = self.i2c.cr2.read().add10().bit_is_set() == TEN_BIT_ADDR_MODE;
+
+                        self.i2c.cr2.modify(|_, w| {
+                            w.head10r()
+                                .bit(ten_bit)
+                                .rd_wrn()
+                                .bit(RD_WRN_READ)
+                                .nbytes()
+                                .variant(len as u8)
+                                .reload()
+                                .bit(reload)
+                                .start()
+                                .set_bit()
+                                .autoend()
+                                .bit(stop == Stop::Automatic)
+                        });
+                    }
+
+                    pub fn master_reload(&mut self, len: usize, stop: Stop) {
+                        let reload = len > 0xFF;
+                        let len = min(0xFF, len);
+
+                        self.i2c.cr2.modify(|_, w| {
+                            w.nbytes()
+                                .variant(len as u8)
+                                .reload()
+                                .bit(reload)
+                                .autoend()
+                                .bit(stop == Stop::Automatic)
+                        });
+                    }
+
+                    pub fn master_stop(&mut self) {
+                        self.i2c.cr2.modify(|_, w| w.stop().set_bit());
+                    }
+
+                    pub fn master_write_bytes(&mut self, bytes: &[u8]) {
+                        let mut rem = bytes.len();
+                        let mut iter = bytes.chunks_exact(0xFF);
+
+                        for chunk in &mut iter {
+                            for byte in chunk {
+                                while self.i2c.isr.read().txis().bit_is_clear() {}
+
+                                self.i2c.txdr.write(|w| w.txdata().variant(*byte));
+                            }
+
+                            rem -= 0xFF;
+
+                            if rem > 0 {
+                                while self.i2c.isr.read().tcr().bit_is_clear() {}
+                                self.master_reload(rem, Stop::Software);
+                            }
+                        }
+
+                        for byte in iter.remainder() {
+                            while self.i2c.isr.read().txis().bit_is_clear() {}
+
+                            self.i2c.txdr.write(|w| w.txdata().variant(*byte));
+                        }
+                    }
+
+                    pub fn master_read_bytes(&mut self, buffer: &mut [u8]) {
+                        let mut rem = buffer.len();
+                        let mut iter = buffer.chunks_exact_mut(0xFF);
+
+                        for chunk in &mut iter {
+                            for byte in chunk {
+                                while self.i2c.isr.read().rxne().bit_is_clear() {}
+
+                                *byte = self.i2c.rxdr.read().rxdata().bits();
+                            }
+
+                            rem -= 0xFF;
+
+                            if rem > 0 {
+                                while self.i2c.isr.read().tcr().bit_is_clear() {}
+                                self.master_reload(rem, Stop::Software);
+                            }
+                        }
+
+                        for byte in iter.into_remainder() {
+                            while self.i2c.isr.read().rxne().bit_is_clear() {}
+
+                            *byte = self.i2c.rxdr.read().rxdata().bits();
+                        }
+                    }
+                }
+
+                impl<PINS> embedded_hal::i2c::blocking::I2c<SevenBitAddress> for I2c<'_, $I2Cx, PINS> {
+                    fn read(&mut self, addr: SevenBitAddress, buffer: &mut [u8]) -> Result<(), Self::Error> {
+                        self.master_read_7(addr, buffer.len(), Stop::Software);
+
+                        self.master_read_bytes(buffer);
+
+                        while self.i2c.isr.read().tc().bit_is_clear() {}
+
+                        self.master_stop();
+
+                        Ok(())
+                    }
+
+                    fn write(&mut self, addr: SevenBitAddress, bytes: &[u8]) -> Result<(), Self::Error> {
+                        self.master_write_7(addr, bytes.len(), Stop::Software);
+
+                        self.master_write_bytes(bytes);
+
+                        while self.i2c.isr.read().tc().bit_is_clear() {}
+
+                        self.master_stop();
+
+                        Ok(())
+                    }
+
+                    fn write_iter<B>(&mut self, _addr: SevenBitAddress, _bytes: B) -> Result<(), Self::Error>
+                    where
+                        B: core::iter::IntoIterator<Item = u8>,
+                    {
+                        todo!()
+                    }
+
+                    fn write_read(&mut self, addr: SevenBitAddress, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Self::Error> {
+                        self.master_write_7(addr, bytes.len(), Stop::Software);
+
+                        self.master_write_bytes(bytes);
+
+                        while self.i2c.isr.read().tc().bit_is_clear() {}
+
+                        self.master_restart(buffer.len(), Stop::Software);
+
+                        self.master_read_bytes(buffer);
+
+                        while self.i2c.isr.read().tc().bit_is_clear() {}
+
+                        self.master_stop();
+
+                        Ok(())
+                    }
+
+                    fn write_iter_read<B>(&mut self, _addr: SevenBitAddress, _bytes: B, _buffer: &mut [u8]) -> Result<(), Self::Error>
+                    where
+                        B: core::iter::IntoIterator<Item = u8>,
+                    {
+                        todo!()
+                    }
+
+                    fn transaction<'a>(&mut self, _addr: u8, _operations: &mut [Operation<'a>]) -> Result<(), Self::Error> {
+                        todo!()
+                    }
+
+                    fn transaction_iter<'a, O>(&mut self, _addr: u8, _operations: O) -> Result<(), Self::Error>
+                    where
+                        O: core::iter::IntoIterator<Item = Operation<'a>>,
+                    {
+                        todo!()
+                    }
                 }
 
                 impl I2cExt for $I2Cx {
-                    fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks + 'a, frequency: Hertz) -> I2c<'a, $I2Cx, PINS>
+                    fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks<'a>, frequency: Hertz) -> I2c<'a, $I2Cx, PINS>
                     where
                         PINS: Pins<$I2Cx>,
                     {
