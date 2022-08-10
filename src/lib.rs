@@ -15,4 +15,4 @@ pub mod rcc;
 pub mod signature;
 pub mod time;
 
-use stm32wb::stm32wb55 as pac;
+pub use stm32wb::stm32wb55 as pac;
