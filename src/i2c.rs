@@ -299,15 +299,16 @@ macro_rules! i2c {
                     pub fn master_restart(&mut self, len: usize, stop: Stop) {
                         assert!(len < 256);
 
-                        let ten_bit = self.i2c.cr2.read().add10().bit_is_set() == TEN_BIT_ADDR_MODE;
+                        let rw = !self.i2c.cr2.read().rd_wrn().bit();
+                        let head10r = rw == RD_WRN_READ && self.i2c.cr2.read().add10().bit_is_set() == TEN_BIT_ADDR_MODE;
 
                         while self.i2c.isr.read().tc().bit_is_clear() {}
 
                         self.i2c.cr2.modify(|_, w| {
                             w.head10r()
-                                .bit(ten_bit)
+                                .bit(head10r)
                                 .rd_wrn()
-                                .bit(RD_WRN_READ)
+                                .bit(rw)
                                 .nbytes()
                                 .variant(len as u8)
                                 .reload()
@@ -346,7 +347,7 @@ macro_rules! i2c {
                         }
 
                         let mut rem = bytes.len();
-                        let mut iter = bytes.chunks_exact(0xFF);
+                        let mut iter = bytes.chunks_exact(255);
 
                         for chunk in &mut iter {
                             self.write_bytes(chunk);
@@ -417,17 +418,16 @@ macro_rules! i2c {
                         }
                     }
 
-                    pub fn master_read_bytes(&mut self, addr: Address, buffer: &mut [u8], restart: bool, stop: Stop) {
+                    pub fn master_read_bytes(&mut self, addr: Address, buffer: &mut [u8], start: Start, stop: Stop) {
                         let (nbytes, stp) = if buffer.len() > 255 {
                             (255, Stop::Reload)
                         } else {
                             (buffer.len(), stop)
                         };
 
-                        if !restart {
-                            self.master_read(addr, nbytes, stp);
-                        } else {
-                            self.master_restart(nbytes, stp);
+                        match start {
+                            Start::Start => self.master_read(addr, nbytes, stp),
+                            Start::Restart => self.master_restart(nbytes, stp),
                         }
 
                         let mut rem = buffer.len();
@@ -464,7 +464,7 @@ macro_rules! i2c {
                     ($addr:ty, $variant:ident) => {
                         impl<PINS> embedded_hal::i2c::blocking::I2c<$addr> for I2c<'_, $I2Cx, PINS> {
                             fn read(&mut self, addr: $addr, buffer: &mut [u8]) -> Result<(), Self::Error> {
-                                self.master_read_bytes(Address::$variant(addr), buffer, false, Stop::Automatic);
+                                self.master_read_bytes(Address::$variant(addr), buffer, Start::Start, Stop::Automatic);
 
                                 Ok(())
                             }
@@ -491,7 +491,7 @@ macro_rules! i2c {
 
                                 self.master_write_bytes(addr, bytes, Stop::Software);
 
-                                self.master_read_bytes(addr, buffer, true, Stop::Automatic);
+                                self.master_read_bytes(addr, buffer, Start::Restart, Stop::Automatic);
 
                                 Ok(())
                             }
@@ -504,7 +504,7 @@ macro_rules! i2c {
 
                                 self.master_write_bytes_iter(addr, bytes, Stop::Software);
 
-                                self.master_read_bytes(addr, buffer, true, Stop::Automatic);
+                                self.master_read_bytes(addr, buffer, Start::Restart, Stop::Automatic);
 
                                 Ok(())
                             }
