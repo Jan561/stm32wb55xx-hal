@@ -351,7 +351,7 @@ macro_rules! i2c {
                         for chunk in &mut iter {
                             self.write_bytes(chunk);
 
-                            rem -= 0x255;
+                            rem -= 255;
 
                             if rem > 255 {
                                 self.master_reload(255, Stop::Reload);
