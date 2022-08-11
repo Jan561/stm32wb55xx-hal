@@ -140,31 +140,87 @@ impl<const P: char, const N: u8, MODE> PinExt for Pin<P, N, MODE> {
     }
 }
 
+macro_rules! p {
+    ($P:expr, $mac:ident) => {
+        paste! {
+            match $P {
+                'A' => $mac!(a),
+                'B' => $mac!(b),
+                'C' => $mac!(c),
+                'D' => $mac!(d),
+                'E' => $mac!(e),
+                'H' => $mac!(h),
+                #[allow(unused_unsafe)]
+                _ => unsafe { core::hint::unreachable_unchecked() },
+            }
+        }
+    };
+}
+
+macro_rules! n {
+    ($N: expr, $mac:ident) => {{
+        paste! {
+            match $N {
+                0 => $mac!(0),
+                1 => $mac!(1),
+                2 => $mac!(2),
+                3 => $mac!(3),
+                4 => $mac!(4),
+                5 => $mac!(5),
+                6 => $mac!(6),
+                7 => $mac!(7),
+                8 => $mac!(8),
+                9 => $mac!(9),
+                10 => $mac!(10),
+                11 => $mac!(11),
+                12 => $mac!(12),
+                13 => $mac!(13),
+                14 => $mac!(14),
+                15 => $mac!(15),
+                #[allow(unused_unsafe)]
+                _ => unsafe { core::hint::unreachable_unchecked() },
+            }
+        }
+    }};
+}
+
+macro_rules! n_reg_w {
+    ($n:expr, $w:expr, $field:ident, $val:expr) => {{
+        macro_rules! __n_reg {
+            ($nn:literal) => {{
+                paste! {
+                    $w.[<$field $nn>]().variant($val)
+                }
+            }};
+        }
+
+        n!($n, __n_reg)
+    }};
+}
+
+macro_rules! n_reg_r_bit {
+    ($n:expr, $r:expr, $field:ident) => {{
+        macro_rules! __n_reg {
+            ($nn:literal) => {{
+                paste! {
+                    $r.[<$field $nn>]().bit()
+                }
+            }};
+        }
+
+        n!($n, __n_reg)
+    }};
+}
+
 impl<const P: char, const N: u8, MODE> Pin<P, N, MODE>
 where
     MODE: marker::OutputSpeed,
 {
     pub fn set_speed(&mut self, speed: Speed) {
         unsafe {
-            (*Gpio::<P>::ptr()).ospeedr.modify(|_, w| match N {
-                0 => w.ospeedr0().variant(speed.into()),
-                1 => w.ospeedr1().variant(speed.into()),
-                2 => w.ospeedr2().variant(speed.into()),
-                3 => w.ospeedr3().variant(speed.into()),
-                4 => w.ospeedr4().variant(speed.into()),
-                5 => w.ospeedr5().variant(speed.into()),
-                6 => w.ospeedr6().variant(speed.into()),
-                7 => w.ospeedr7().variant(speed.into()),
-                8 => w.ospeedr8().variant(speed.into()),
-                9 => w.ospeedr9().variant(speed.into()),
-                10 => w.ospeedr10().variant(speed.into()),
-                11 => w.ospeedr11().variant(speed.into()),
-                12 => w.ospeedr12().variant(speed.into()),
-                13 => w.ospeedr13().variant(speed.into()),
-                14 => w.ospeedr14().variant(speed.into()),
-                15 => w.ospeedr15().variant(speed.into()),
-                _ => unreachable!(),
-            });
+            (*Gpio::<P>::ptr())
+                .ospeedr
+                .modify(|_, w| n_reg_w!(N, w, ospeedr, speed.into()));
         }
     }
 
@@ -181,26 +237,46 @@ where
 {
     pub fn set_internal_resistor(&mut self, resistor: Pull) {
         unsafe {
-            (*Gpio::<P>::ptr()).pupdr.modify(|_, w| match N {
-                0 => w.pupdr0().variant(resistor.into()),
-                1 => w.pupdr1().variant(resistor.into()),
-                2 => w.pupdr2().variant(resistor.into()),
-                3 => w.pupdr3().variant(resistor.into()),
-                4 => w.pupdr4().variant(resistor.into()),
-                5 => w.pupdr5().variant(resistor.into()),
-                6 => w.pupdr6().variant(resistor.into()),
-                7 => w.pupdr7().variant(resistor.into()),
-                8 => w.pupdr8().variant(resistor.into()),
-                9 => w.pupdr9().variant(resistor.into()),
-                10 => w.pupdr10().variant(resistor.into()),
-                11 => w.pupdr11().variant(resistor.into()),
-                12 => w.pupdr12().variant(resistor.into()),
-                13 => w.pupdr13().variant(resistor.into()),
-                14 => w.pupdr14().variant(resistor.into()),
-                15 => w.pupdr15().variant(resistor.into()),
-                _ => unreachable!(),
-            });
+            (*Gpio::<P>::ptr())
+                .pupdr
+                .modify(|_, w| n_reg_w!(N, w, pupdr, resistor.into()));
         }
+    }
+
+    pub fn set_internal_resistor_lp(&mut self, resistor: Pull) {
+        let pwr = unsafe { &*crate::pac::PWR::PTR };
+
+        let (pu, pd) = match resistor {
+            Pull::Floating => (false, false),
+            Pull::Up => (true, false),
+            Pull::Down => (false, true),
+        };
+
+        macro_rules! outer {
+            ($p:ident) => {{
+                macro_rules! inner {
+                    ($n:literal) => {{
+                        paste! {
+                            // pucra has missing fields
+                            let pur = unsafe {
+                                &*(&pwr.[<pucr $p>] as *const _ as *const stm32wb::Reg<crate::pac::pwr::pucrb::PUCRB_SPEC>)
+                            };
+                            // pucra, pucrb have missing fields
+                            let pdr = unsafe {
+                                &*(&pwr.[<pdcr $p>] as *const _ as *const stm32wb::Reg<crate::pac::pwr::pdcrc::PDCRC_SPEC>)
+                            };
+
+                            pur.modify(|_, w| w.[<pu $n>]().bit(pu));
+                            pdr.modify(|_, w| w.[<pd $n>]().bit(pd));
+                        }
+                    }};
+                }
+
+                n!(N, inner);
+            }};
+        }
+
+        p!(P, outer);
     }
 
     #[inline(always)]
@@ -221,49 +297,13 @@ impl<const P: char, const N: u8, MODE> Pin<P, N, MODE> {
 
     fn _set_high(&mut self) {
         unsafe {
-            (*Gpio::<P>::ptr()).bsrr.write(|w| match N {
-                0 => w.bs0().set_bit(),
-                1 => w.bs1().set_bit(),
-                2 => w.bs2().set_bit(),
-                3 => w.bs3().set_bit(),
-                4 => w.bs4().set_bit(),
-                5 => w.bs5().set_bit(),
-                6 => w.bs6().set_bit(),
-                7 => w.bs7().set_bit(),
-                8 => w.bs8().set_bit(),
-                9 => w.bs9().set_bit(),
-                10 => w.bs10().set_bit(),
-                11 => w.bs11().set_bit(),
-                12 => w.bs12().set_bit(),
-                13 => w.bs13().set_bit(),
-                14 => w.bs14().set_bit(),
-                15 => w.bs15().set_bit(),
-                _ => unreachable!(),
-            });
+            (*Gpio::<P>::ptr()).bsrr.write(|w| n_reg_w!(N, w, bs, true));
         }
     }
 
     fn _set_low(&mut self) {
         unsafe {
-            (*Gpio::<P>::ptr()).bsrr.write(|w| match N {
-                0 => w.br0().set_bit(),
-                1 => w.br1().set_bit(),
-                2 => w.br2().set_bit(),
-                3 => w.br3().set_bit(),
-                4 => w.br4().set_bit(),
-                5 => w.br5().set_bit(),
-                6 => w.br6().set_bit(),
-                7 => w.br7().set_bit(),
-                8 => w.br8().set_bit(),
-                9 => w.br9().set_bit(),
-                10 => w.br10().set_bit(),
-                11 => w.br11().set_bit(),
-                12 => w.br12().set_bit(),
-                13 => w.br13().set_bit(),
-                14 => w.br14().set_bit(),
-                15 => w.br15().set_bit(),
-                _ => unreachable!(),
-            });
+            (*Gpio::<P>::ptr()).bsrr.write(|w| n_reg_w!(N, w, br, true));
         }
     }
 
@@ -271,25 +311,7 @@ impl<const P: char, const N: u8, MODE> Pin<P, N, MODE> {
         unsafe {
             let r = (*Gpio::<P>::ptr()).odr.read();
 
-            match N {
-                0 => r.odr0().bit(),
-                1 => r.odr1().bit(),
-                2 => r.odr2().bit(),
-                3 => r.odr3().bit(),
-                4 => r.odr4().bit(),
-                5 => r.odr5().bit(),
-                6 => r.odr6().bit(),
-                7 => r.odr7().bit(),
-                8 => r.odr8().bit(),
-                9 => r.odr9().bit(),
-                10 => r.odr10().bit(),
-                11 => r.odr11().bit(),
-                12 => r.odr12().bit(),
-                13 => r.odr13().bit(),
-                14 => r.odr14().bit(),
-                15 => r.odr15().bit(),
-                _ => unreachable!(),
-            }
+            n_reg_r_bit!(N, r, odr)
         }
     }
 
@@ -297,25 +319,7 @@ impl<const P: char, const N: u8, MODE> Pin<P, N, MODE> {
         unsafe {
             let r = (*Gpio::<P>::ptr()).idr.read();
 
-            match N {
-                0 => r.idr0().bit(),
-                1 => r.idr1().bit(),
-                2 => r.idr2().bit(),
-                3 => r.idr3().bit(),
-                4 => r.idr4().bit(),
-                5 => r.idr5().bit(),
-                6 => r.idr6().bit(),
-                7 => r.idr7().bit(),
-                8 => r.idr8().bit(),
-                9 => r.idr9().bit(),
-                10 => r.idr10().bit(),
-                11 => r.idr11().bit(),
-                12 => r.idr12().bit(),
-                13 => r.idr13().bit(),
-                14 => r.idr14().bit(),
-                15 => r.idr15().bit(),
-                _ => unreachable!(),
-            }
+            n_reg_r_bit!(N, r, idr)
         }
     }
 }

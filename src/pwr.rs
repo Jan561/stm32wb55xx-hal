@@ -44,16 +44,12 @@
 //!
 //! Note: Stop, Standby and Shutdown Modes are only entered, when both CPUs are in CStop mode
 
-pub mod pxcr;
-
 use crate::pac::pwr::{sr1, sr2};
 use crate::pac::{PWR, RCC};
 use crate::rcc::{self, Clocks};
 use cortex_m::peripheral::SCB;
 use fugit::RateExtU32;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
-
-use self::pxcr::Pxcr;
 
 #[derive(Debug)]
 pub enum Error {
@@ -77,10 +73,6 @@ pub struct Pwr {
 }
 
 impl Pwr {
-    pub fn pxcr(&self) -> Pxcr {
-        Pxcr(self)
-    }
-
     // See RM0434 Rev 10 p. 146
     pub fn set_power_range<'a>(
         &mut self,
