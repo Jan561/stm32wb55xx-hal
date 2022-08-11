@@ -165,6 +165,7 @@ impl<I2C, PINS> embedded_hal::i2c::ErrorType for I2c<'_, I2C, PINS> {
     type Error = Error;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Address {
     SevenBit(SevenBitAddress),
     TenBit(TenBitAddress),
@@ -385,7 +386,7 @@ macro_rules! i2c {
                         self.master_write_bytes(addr, &buf[..nbytes], stp);
 
                         while cnt == 256 {
-                            buf[0] = buf[256];
+                            buf[0] = buf[255];
                             cnt = 1;
 
                             for e in iter.by_ref().take(255) {
@@ -459,92 +460,71 @@ macro_rules! i2c {
                     }
                 }
 
-                impl<PINS> embedded_hal::i2c::blocking::I2c<SevenBitAddress> for I2c<'_, $I2Cx, PINS> {
-                    fn read(&mut self, addr: SevenBitAddress, buffer: &mut [u8]) -> Result<(), Self::Error> {
-                        self.master_read_bytes(Address::SevenBit(addr), buffer, false, Stop::Automatic);
+                macro_rules! hal {
+                    ($addr:ty, $variant:ident) => {
+                        impl<PINS> embedded_hal::i2c::blocking::I2c<$addr> for I2c<'_, $I2Cx, PINS> {
+                            fn read(&mut self, addr: $addr, buffer: &mut [u8]) -> Result<(), Self::Error> {
+                                self.master_read_bytes(Address::$variant(addr), buffer, false, Stop::Automatic);
 
-                        Ok(())
-                    }
-
-                    fn write(&mut self, addr: SevenBitAddress, bytes: &[u8]) -> Result<(), Self::Error> {
-                        self.master_write_bytes(Address::SevenBit(addr), bytes, Stop::Automatic);
-
-                        Ok(())
-                    }
-
-                    fn write_iter<B>(&mut self, addr: SevenBitAddress, bytes: B) -> Result<(), Self::Error>
-                    where
-                        B: core::iter::IntoIterator<Item = u8>,
-                    {
-                        let addr = Address::SevenBit(addr);
-
-                        let mut buf = [0; 256];
-                        let mut cnt = 0;
-
-                        let mut iter = bytes.into_iter();
-
-                        for e in iter.by_ref().take(256) {
-                            buf[cnt] = e;
-                            cnt += 1;
-                        }
-
-                        let (nbytes, stop) = if cnt == 256 {
-                            (255, Stop::Reload)
-                        } else {
-                            (cnt, Stop::Automatic)
-                        };
-
-                        self.master_write_bytes(addr, &buf[..nbytes], stop);
-
-                        while cnt == 256 {
-                            buf[0] = buf[256];
-                            cnt = 1;
-
-                            for e in iter.by_ref().take(255) {
-                                buf[cnt] = e;
-                                cnt += 1;
+                                Ok(())
                             }
 
-                            let (nbytes, stop) = if cnt == 256 {
-                                (255, Stop::Reload)
-                            } else {
-                                (cnt, Stop::Automatic)
-                            };
+                            fn write(&mut self, addr: $addr, bytes: &[u8]) -> Result<(), Self::Error> {
+                                self.master_write_bytes(Address::$variant(addr), bytes, Stop::Automatic);
 
-                            self.master_reload(nbytes, stop);
+                                Ok(())
+                            }
 
-                            self.write_bytes(&buf[..nbytes]);
+                            fn write_iter<B>(&mut self, addr: $addr, bytes: B) -> Result<(), Self::Error>
+                            where
+                                B: core::iter::IntoIterator<Item = u8>,
+                            {
+                                let addr = Address::$variant(addr);
+
+                                self.master_write_bytes_iter(addr, bytes, Stop::Automatic);
+
+                                Ok(())
+                            }
+
+                            fn write_read(&mut self, addr: $addr, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Self::Error> {
+                                let addr = Address::$variant(addr);
+
+                                self.master_write_bytes(addr, bytes, Stop::Software);
+
+                                self.master_read_bytes(addr, buffer, true, Stop::Automatic);
+
+                                Ok(())
+                            }
+
+                            fn write_iter_read<B>(&mut self, addr: $addr, bytes: B, buffer: &mut [u8]) -> Result<(), Self::Error>
+                            where
+                                B: core::iter::IntoIterator<Item = u8>,
+                            {
+                                let addr = Address::$variant(addr);
+
+                                self.master_write_bytes_iter(addr, bytes, Stop::Software);
+
+                                self.master_read_bytes(addr, buffer, true, Stop::Automatic);
+
+                                Ok(())
+                            }
+
+                            fn transaction<'a>(&mut self, _addr: $addr, _operations: &mut [Operation<'a>]) -> Result<(), Self::Error> {
+                                todo!()
+                            }
+
+                            fn transaction_iter<'a, O>(&mut self, _addr: $addr, _operations: O) -> Result<(), Self::Error>
+                            where
+                                O: core::iter::IntoIterator<Item = Operation<'a>>,
+                            {
+                                todo!()
+                            }
                         }
-
-                        Ok(())
-                    }
-
-                    fn write_read(&mut self, addr: SevenBitAddress, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Self::Error> {
-                        self.master_write_bytes(Address::SevenBit(addr), bytes, Stop::Software);
-
-                        self.master_read_bytes(Address::SevenBit(addr), buffer, true, Stop::Automatic);
-
-                        Ok(())
-                    }
-
-                    fn write_iter_read<B>(&mut self, _addr: SevenBitAddress, _bytes: B, _buffer: &mut [u8]) -> Result<(), Self::Error>
-                    where
-                        B: core::iter::IntoIterator<Item = u8>,
-                    {
-                        todo!()
-                    }
-
-                    fn transaction<'a>(&mut self, _addr: u8, _operations: &mut [Operation<'a>]) -> Result<(), Self::Error> {
-                        todo!()
-                    }
-
-                    fn transaction_iter<'a, O>(&mut self, _addr: u8, _operations: O) -> Result<(), Self::Error>
-                    where
-                        O: core::iter::IntoIterator<Item = Operation<'a>>,
-                    {
-                        todo!()
                     }
                 }
+
+                hal! { SevenBitAddress, SevenBit }
+                hal! { TenBitAddress, TenBit }
 
                 impl I2cExt for $I2Cx {
                     fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks<'a>, frequency: Hertz) -> I2c<'a, $I2Cx, PINS>
