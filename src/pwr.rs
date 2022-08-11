@@ -48,8 +48,9 @@ pub mod pxcr;
 
 use crate::pac::pwr::{sr1, sr2};
 use crate::pac::{PWR, RCC};
-use crate::rcc;
+use crate::rcc::{self, Clocks};
 use cortex_m::peripheral::SCB;
+use fugit::RateExtU32;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 use self::pxcr::Pxcr;
@@ -81,8 +82,12 @@ impl Pwr {
     }
 
     // See RM0434 Rev 10 p. 146
-    pub fn set_power_range(&self, range: Vos, sysclk: u32) -> Result<(), Error> {
-        if range == Vos::Range2 && sysclk > 2_000_000 {
+    pub fn set_power_range<'a>(
+        &mut self,
+        range: Vos,
+        clocks: impl Clocks<'a>,
+    ) -> Result<(), Error> {
+        if range == Vos::Range2 && clocks.sysclk() > 2.MHz::<1, 1>() {
             return Err(Error::SysclkTooHighVos);
         }
 
@@ -90,7 +95,7 @@ impl Pwr {
 
         if old_vos == Vos::Range1 && range == Vos::Range2 {
             let rcc = unsafe { &*RCC::PTR };
-            rcc::set_flash_latency(rcc, sysclk);
+            rcc::set_flash_latency(rcc, clocks.sysclk().to_Hz());
         }
 
         self.pwr.cr1.modify(|_, w| w.vos().variant(range.into()));
@@ -113,8 +118,8 @@ impl Pwr {
     ///
     /// After calling the function, the clock speed must not be increased
     /// above 2 MHz.
-    pub fn enter_low_power_run(&self, sysclk: u32) -> Result<(), Error> {
-        if sysclk > 2_000_000 {
+    pub fn enter_low_power_run<'a>(&mut self, clocks: impl Clocks<'a>) -> Result<(), Error> {
+        if clocks.sysclk() > 2.MHz::<1, 1>() {
             return Err(Error::SysclkTooHighLpr);
         }
 
@@ -126,42 +131,6 @@ impl Pwr {
         #[cfg(feature = "cm0p")]
         {
             cr1.modify(|_, w| w.fpdr().clear_bit());
-            self.pwr.cr1.modify(|_, w| w.lpr().set_bit());
-        }
-
-        Ok(())
-    }
-
-    /// Enter low power run mode with disabled flash
-    ///
-    /// After calling the function, the clock speed must not be increased
-    /// above 2 MHz
-    ///
-    /// # SAFETY
-    ///
-    /// This method must be called from SRAM
-    pub unsafe fn enter_low_power_run_no_flash(&self, sysclk: u32) -> Result<(), Error> {
-        if sysclk > 2_000_000 {
-            return Err(Error::SysclkTooHighLpr);
-        }
-
-        let cr1 = &c1_c2!(self.pwr.cr1, self.pwr.c2cr1);
-
-        if !cr1.read().fpdr().bit_is_set() {
-            // We need to unlock the register first
-            const WRITE_KEY: u32 = 0xC1B0;
-
-            // SAFETY: See RM0434 Rev 10 p. 173
-            // This doesn't actually overwrite the register values
-            cr1.write(|w| w.bits(WRITE_KEY));
-        }
-
-        #[cfg(feature = "cm4")]
-        cr1.modify(|_, w| w.fpdr().set_bit().lpr().set_bit());
-
-        #[cfg(feature = "cm0p")]
-        {
-            cr1.modify(|_, w| w.fpdr().set_bit());
             self.pwr.cr1.modify(|_, w| w.lpr().set_bit());
         }
 
@@ -230,216 +199,314 @@ impl Pwr {
         scb.set_sleeponexit();
     }
 
+    /// Low-Power mode selection
+    pub fn lp_mode(&self) -> Lpms {
+        c1_c2!(self.pwr.cr1, self.pwr.c2cr1)
+            .read()
+            .lpms()
+            .bits()
+            .try_into()
+            .unwrap()
+    }
+
+    /// Flash memory power down mode during LPRun for CPUx
+    ///
+    /// Selects whether the flash memory is in power down mode or idle mode when in LPRun mode. (flash memory
+    /// can only be in power down mode when code is executed from SRAM). Flash memory is set
+    /// in power down mode only when the system is in LPRun mode, and the FPDR
+    /// bit from the other CPU too allows so
+    ///
+    /// - `false`: Flash memory in idle mode when system is in LPRun mode
+    /// - `true`: Flash memory in power down mode when system is in LPRun mode
+    pub fn lp_run_flash_powerdown(&self) -> bool {
+        c1_c2!(self.pwr.cr1, self.pwr.c2cr1).read().fpdr().bit()
+    }
+
+    pub fn set_lp_run_flash_powerdown(&mut self, powerdown: bool) {
+        let cr1 = &c1_c2!(self.pwr.cr1, self.pwr.c2cr1);
+
+        if powerdown {
+            const WRITE_KEY: u32 = 0xC1B0;
+
+            // SAFETY: See RM0434 Rev 10 p. 173
+            // This doesn't actually overwrite the register values
+            unsafe {
+                cr1.write(|w| w.bits(WRITE_KEY));
+            }
+        }
+
+        cr1.modify(|_, w| w.fpdr().bit(powerdown));
+    }
+
+    /// Flash memory power down mode during LPSleep for CPUx
+    ///
+    /// This bit selects whether the flash memory is in power down mode or idle mode when both
+    /// CPUs are in Sleep mode. flash memory is set in power down mode only when the system is
+    /// in LPSleep mode and the FPDS bit of the other CPU also allows this
+    ///
+    /// - `false`: Flash memory in Idle mode when system is in LPSleep mode
+    /// - `true`: Flash memory in power down mode when system is in LPSleep mode
+    pub fn lp_sleep_flash_powerdown(&self) -> bool {
+        c1_c2!(self.pwr.cr1, self.pwr.c2cr1).read().fpds().bit()
+    }
+
+    pub fn set_lp_sleep_flash_powerdown(&mut self, powerdown: bool) {
+        c1_c2!(self.pwr.cr1, self.pwr.c2cr1).modify(|_, w| w.fpds().bit(powerdown));
+    }
+
+    pub fn dbp(&self) -> bool {
+        self.pwr.cr1.read().dbp().bit()
+    }
+
+    pub fn power_range(&self) -> Vos {
+        self.pwr.cr1.read().vos().bits().try_into().unwrap()
+    }
+
+    pub fn lp_run(&self) -> bool {
+        self.pwr.cr1.read().lpr().bit()
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn blee_wakeup(&self) -> bool {
+        self.pwr.c2cr1.read().bleewkup().bit()
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn set_blee_wakeup(&mut self, wkup: bool) {
+        self.pwr.c2cr1.modify(|_, w| w.bleewkup().bit(wkup));
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn i802e_wakeup(&self) -> bool {
+        self.pwr.c2cr1.read()._802ewkup().bit()
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn set_i802e_wakeup(&mut self, wkup: bool) {
+        self.pwr.c2cr1.modify(|_, w| w._802ewkup().bit(wkup));
+    }
+
     /// Disable backup domain write protection\n\n\
     ///
     /// - `false`: Access to RTC and Backup registers disabled
     /// - `true`: Access to RTC and Backup registers enabled
-    pub fn dbp(&self, dbp: bool) {
+    pub fn set_dbp(&self, dbp: bool) {
         self.pwr.cr1.modify(|_, w| w.dbp().bit(dbp));
     }
 
-    pub fn cr1_read(&self) -> Cr1R {
-        Cr1R::read_from(&self.pwr)
+    pub fn enable_power_voltage_detector(&mut self, level: Pls) {
+        self.pwr
+            .cr2
+            .modify(|_, w| w.pls().variant(level.into()).pvde().set_bit());
     }
 
-    #[cfg(feature = "cm0p")]
-    pub fn shared_cr1_read(&self) -> SharedCr1R {
-        SharedCr1R::read_from(&self.pwr)
+    pub fn disable_power_voltage_detector(&mut self) {
+        self.pwr.cr2.modify(|_, w| w.pvde().clear_bit());
     }
 
-    #[cfg(feature = "cm0p")]
-    pub fn cr1<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Cr1R, &'w mut Cr1W) -> &'w mut Cr1W,
-    {
-        let r = Cr1R::read_from(&self.pwr);
-        let mut wc = Cr1W(r.0);
-
-        op(&r, &mut wc);
-
-        self.pwr.c2cr1.modify(|_, w| {
-            w.bleewkup()
-                .bit(wc._bleewkup())
-                ._802ewkup()
-                .bit(wc.__802ewkup())
-        })
+    /// Peripheral voltage monitoring 1 enable: V_{DDUSB} vs 1.2 V
+    pub fn peripheral_voltage_monitoring_1(&mut self, en: bool) {
+        self.pwr.cr2.modify(|_, w| w.pvme1().bit(en));
     }
 
-    pub fn cr2<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Cr2R, &'w mut Cr2W) -> &'w mut Cr2W,
-    {
-        let r = Cr2R::read_from(&self.pwr);
-        let mut wc = Cr2W(r.0);
+    /// Peripheral voltafe monitoring 3 enable: V_{DDA} vs 1.62 V
+    pub fn peripheral_voltage_monitoring_3(&mut self, en: bool) {
+        self.pwr.cr2.modify(|_, w| w.pvme3().bit(en));
+    }
 
-        op(&r, &mut wc);
+    /// V_{DDUSB} USB supply valid
+    pub fn usb_supply_valid(&self) -> bool {
+        self.pwr.cr2.read().usv().bit()
+    }
 
-        if r.0 == wc.0 {
-            return;
+    pub fn set_usb_supply_valid(&mut self, val: bool) {
+        self.pwr.cr2.modify(|_, w| w.usv().bit(val));
+    }
+
+    /// Enable wakeup pin WKUPx for CPUx
+    ///
+    /// When this bit is set, the external wakeup pin WKUP5 is enabled and triggers an interrupt and
+    /// wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
+    /// CPUx. The active edge is configured via the WP5 bit in the PWR control register 4
+    /// (PWR_CR4)
+    pub fn enable_wakeup_src(&mut self, src: WakeupSource) {
+        let cr3 = &c1_c2!(self.pwr.cr3, self.pwr.c2cr3);
+
+        match src {
+            WakeupSource::Wkup1 => cr3.modify(|_, w| w.ewup1().set_bit()),
+            WakeupSource::Wkup2 => cr3.modify(|_, w| w.ewup2().set_bit()),
+            WakeupSource::Wkup3 => cr3.modify(|_, w| w.ewup3().set_bit()),
+            WakeupSource::Wkup4 => cr3.modify(|_, w| w.ewup4().set_bit()),
+            WakeupSource::Wkup5 => cr3.modify(|_, w| w.ewup5().set_bit()),
+            #[cfg(feature = "cm0p")]
+            WakeupSource::Ble => cr3.modify(|_, w| w.eblewup().set_bit()),
+            #[cfg(feature = "cm0p")]
+            WakeupSource::_802 => cr3.modify(|_, w| w.e802wup().set_bit()),
         }
-
-        self.pwr.cr2.modify(|_, w| {
-            w.pvde()
-                .bit(wc._pvde())
-                .pls()
-                .variant(wc._pls())
-                .pvme1()
-                .bit(wc._pvme1())
-                .pvme3()
-                .bit(wc._pvme3())
-                .usv()
-                .bit(wc._usv())
-        });
     }
 
-    pub fn cr2_read(&self) -> Cr2R {
-        Cr2R::read_from(&self.pwr)
-    }
-
-    pub fn cr3<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Cr3R, &'w mut Cr3W) -> &'w mut Cr3W,
-    {
-        let r = Cr3R::read_from(&self.pwr);
-        let mut wc = Cr3W(r.0);
-
-        op(&r, &mut wc);
-
-        if r.0 == wc.0 {
-            return;
+    pub fn wakeup_polarity(&mut self, pin: WakeupSource, polarity: Polarity) {
+        match pin {
+            WakeupSource::Wkup1 => self
+                .pwr
+                .cr4
+                .modify(|_, w| w.wp1().bit(polarity == Polarity::Low)),
+            WakeupSource::Wkup2 => self
+                .pwr
+                .cr4
+                .modify(|_, w| w.wp2().bit(polarity == Polarity::Low)),
+            WakeupSource::Wkup3 => self
+                .pwr
+                .cr4
+                .modify(|_, w| w.wp3().bit(polarity == Polarity::Low)),
+            WakeupSource::Wkup4 => self
+                .pwr
+                .cr4
+                .modify(|_, w| w.wp4().bit(polarity == Polarity::Low)),
+            WakeupSource::Wkup5 => self
+                .pwr
+                .cr4
+                .modify(|_, w| w.wp5().bit(polarity == Polarity::Low)),
+            #[cfg(feature = "cm0p")]
+            _ => panic!("Only wakeup pins have an polarity"),
         }
-
-        #[cfg(feature = "cm4")]
-        self.pwr.cr3.modify(|_, w| {
-            w.ewup1()
-                .bit(wc._ewup1())
-                .ewup2()
-                .bit(wc._ewup2())
-                .ewup3()
-                .bit(wc._ewup3())
-                .ewup4()
-                .bit(wc._ewup4())
-                .ewup5()
-                .bit(wc._ewup5())
-                .eborhsdfb()
-                .bit(wc._eborhsmpsfb())
-                .rrs()
-                .bit(wc._rrs())
-                .apc()
-                .bit(wc._apc())
-                .ecrpe()
-                .bit(wc._ecpre())
-                .eblea()
-                .bit(wc._eblea())
-                .e802a()
-                .bit(wc._e802a())
-                .ec2h()
-                .bit(wc._ec2h())
-                .eiwul()
-                .bit(wc._eiwul())
-        });
-
-        #[cfg(feature = "cm0p")]
-        self.pwr.c2cr3.modify(|_, w| {
-            w.ewup1()
-                .bit(wc._ewup1())
-                .ewup2()
-                .bit(wc._ewup2())
-                .ewup3()
-                .bit(wc._ewup3())
-                .ewup4()
-                .bit(wc._ewup4())
-                .ewup5()
-                .bit(wc._ewup5())
-                .eblewup()
-                .bit(wc._eblewup())
-                .e802wup()
-                .bit(wc._e802wup())
-                .apc()
-                .bit(wc._apc())
-                .eiwul()
-                .bit(wc._eiwul())
-        });
     }
 
-    pub fn read_cr3(&self) -> Cr3R {
-        Cr3R::read_from(&self.pwr)
-    }
+    pub fn disable_wakeup_src(&mut self, src: WakeupSource) {
+        let cr3 = &c1_c2!(self.pwr.cr3, self.pwr.c2cr3);
 
-    #[cfg(feature = "cm0p")]
-    pub fn rrs(&self) -> bool {
-        self.pwr.cr3.read().rrs().bit_is_set()
-    }
-
-    #[cfg(feature = "cm0p")]
-    pub fn set_rrs(&self, val: bool) {
-        self.pwr.cr3.modify(|_, w| w.rrs().bit(val));
-    }
-
-    pub fn cr4<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Cr4R, &'w mut Cr4W) -> &'w mut Cr4W,
-    {
-        let r = Cr4R::read_from(&self.pwr);
-        let mut wc = Cr4W(r.0);
-
-        op(&r, &mut wc);
-
-        if r.0 == wc.0 {
-            return;
+        match src {
+            WakeupSource::Wkup1 => cr3.modify(|_, w| w.ewup1().clear_bit()),
+            WakeupSource::Wkup2 => cr3.modify(|_, w| w.ewup2().clear_bit()),
+            WakeupSource::Wkup3 => cr3.modify(|_, w| w.ewup3().clear_bit()),
+            WakeupSource::Wkup4 => cr3.modify(|_, w| w.ewup4().clear_bit()),
+            WakeupSource::Wkup5 => cr3.modify(|_, w| w.ewup5().clear_bit()),
+            #[cfg(feature = "cm0p")]
+            WakeupSource::Ble => cr3.modify(|_, w| w.eblewup().clear_bit()),
+            #[cfg(feature = "cm0p")]
+            WakeupSource::_802 => cr3.modify(|_, w| w.e802wup().clear_bit()),
         }
-
-        self.pwr.cr4.modify(|_, w| {
-            w.wp1()
-                .bit(wc._wp1())
-                .wp2()
-                .bit(wc._wp2())
-                .wp3()
-                .bit(wc._wp3())
-                .wp4()
-                .bit(wc._wp4())
-                .wp5()
-                .bit(wc._wp5())
-                .vbe()
-                .bit(wc._vbe())
-                .vbrs()
-                .bit(wc._vbrs())
-                .c2boot()
-                .bit(wc._c2boot())
-        });
     }
 
-    pub fn cr4_read(&self) -> Cr4R {
-        Cr4R::read_from(&self.pwr)
-    }
-
-    pub fn cr5<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Cr5R, &'w mut Cr5W) -> &'w mut Cr5W,
-    {
-        let r = Cr5R::read_from(&self.pwr);
-        let mut wc = Cr5W(r.0);
-
-        op(&r, &mut wc);
-
-        if r.0 == wc.0 {
-            return;
+    pub fn clear_wakeup_flag(&mut self, src: WakeupSource) {
+        match src {
+            WakeupSource::Wkup1 => self.pwr.scr.write(|w| w.cwuf1().set_bit()),
+            WakeupSource::Wkup2 => self.pwr.scr.write(|w| w.cwuf2().set_bit()),
+            WakeupSource::Wkup3 => self.pwr.scr.write(|w| w.cwuf3().set_bit()),
+            WakeupSource::Wkup4 => self.pwr.scr.write(|w| w.cwuf4().set_bit()),
+            WakeupSource::Wkup5 => self.pwr.scr.write(|w| w.cwuf5().set_bit()),
+            #[cfg(feature = "cm0p")]
+            WakeupSource::Ble => self.pwr.scr.write(|w| w.cblewuf().set_bit()),
+            #[cfg(feature = "cm0p")]
+            WakeupSource::_802 => self.pwr.scr.write(|w| w.c802wuf().set_bit()),
         }
-
-        self.pwr.cr5.modify(|_, w| {
-            w.sdvos()
-                .variant(wc._smpsvos())
-                .sdsc()
-                .variant(wc._smpssc())
-                .borhc()
-                .bit(wc._borhc())
-                .sdeb()
-                .bit(wc._smpsen())
-        });
     }
 
-    pub fn cr5_read(&self) -> Cr5R {
-        Cr5R::read_from(&self.pwr)
+    pub fn sram2a_retention(&mut self, rrs: bool) {
+        self.pwr.cr3.modify(|_, w| w.rrs().bit(rrs));
+    }
+
+    pub fn apply_pull_mode_cfg(&mut self, val: bool) {
+        c1_c2!(self.pwr.cr3, self.pwr.c2cr3).modify(|_, w| w.apc().bit(val));
+    }
+
+    #[cfg(feature = "cm4")]
+    pub fn listen(&mut self, event: Event) {
+        match event {
+            Event::BorhSmpsStepDownInBypass => self.pwr.cr3.modify(|_, w| w.eborhsdfb().set_bit()),
+            Event::CriticalRadioPhaseEOA => self.pwr.cr3.modify(|_, w| w.ecrpe().set_bit()),
+            Event::BleEOA => self.pwr.cr3.modify(|_, w| w.eblea().set_bit()),
+            Event::_802EOA => self.pwr.cr3.modify(|_, w| w.e802a().set_bit()),
+            Event::Cpu2Hold => self.pwr.cr3.modify(|_, w| w.ec2h().set_bit()),
+        }
+    }
+
+    #[cfg(feature = "cm4")]
+    pub fn unlisten(&mut self, event: Event) {
+        match event {
+            Event::BorhSmpsStepDownInBypass => {
+                self.pwr.cr3.modify(|_, w| w.eborhsdfb().clear_bit())
+            }
+            Event::CriticalRadioPhaseEOA => self.pwr.cr3.modify(|_, w| w.ecrpe().clear_bit()),
+            Event::BleEOA => self.pwr.cr3.modify(|_, w| w.eblea().clear_bit()),
+            Event::_802EOA => self.pwr.cr3.modify(|_, w| w.e802a().clear_bit()),
+            Event::Cpu2Hold => self.pwr.cr3.modify(|_, w| w.ec2h().clear_bit()),
+        }
+    }
+
+    #[cfg(feature = "cm4")]
+    pub fn clear_event_flag(&mut self, event: Event) {
+        match event {
+            Event::BorhSmpsStepDownInBypass => self.pwr.scr.write(|w| w.csmpsfbf().set_bit()),
+            Event::CriticalRadioPhaseEOA => self.pwr.scr.write(|w| w.ccrpef().set_bit()),
+            Event::BleEOA => self.pwr.scr.write(|w| w.cbleaf().set_bit()),
+            Event::_802EOA => self.pwr.scr.write(|w| w.c802af().set_bit()),
+            Event::Cpu2Hold => self.pwr.scr.write(|w| w.cc2hf().set_bit()),
+        }
+    }
+
+    pub fn internal_wakeup(&mut self, en: bool) {
+        c1_c2!(self.pwr.cr3, self.pwr.c2cr3).modify(|_, w| w.eiwul().bit(en));
+    }
+
+    pub fn charge_bat(&mut self, bat: BatteryCharging) {
+        match bat {
+            BatteryCharging::Disabled => self.pwr.cr4.modify(|_, w| w.vbe().clear_bit()),
+            BatteryCharging::R1_5 => self
+                .pwr
+                .cr4
+                .modify(|_, w| w.vbe().set_bit().vbrs().bit(true)),
+            BatteryCharging::R5 => self
+                .pwr
+                .cr4
+                .modify(|_, w| w.vbe().set_bit().vbrs().bit(false)),
+        }
+    }
+
+    /// Boot CPU2 after reset or wakeup from stop or standby modes
+    pub fn c2boot(&mut self, val: bool) {
+        self.pwr.cr4.modify(|_, w| w.c2boot().bit(val));
+    }
+
+    pub fn smpsvos_factory() -> u8 {
+        SmpsVos::get().factory()
+    }
+
+    /// SMPS step-down converter voltage output scaling
+    ///
+    /// These bits are initialized after Option byte loading with factory trimmed value to reach 1.5 V,
+    /// and can subsequently be overwritten by firmware.
+    ///
+    /// SMPS step down output voltage step size is 50 mV.
+    ///
+    /// If factory trimmed value - 0x8 gives 1.50 V on VFBSMSPS, to get 1.40 V 0x2 must be
+    /// subtracted from this value
+    ///
+    /// - 0x0 = minimum voltage level
+    /// - 0xF = maximum voltage level
+    pub fn smps_vos(&mut self, val: u8) {
+        assert!(val < 16);
+
+        self.pwr.cr5.modify(|_, w| w.sdvos().variant(val));
+    }
+
+    /// SMPS step-down converter supply startup current selection
+    ///
+    /// Startup current is limited to maximum 80 mA + SMPSSC x 20 mA
+    pub fn smps_sc(&mut self, val: u8) {
+        assert!(val < 8);
+
+        self.pwr.cr5.modify(|_, w| w.sdsc().variant(val));
+    }
+
+    pub fn borh(&mut self, borh: Borh) {
+        self.pwr
+            .cr5
+            .modify(|_, w| w.borhc().bit(borh == Borh::SmpsBypass));
+    }
+
+    pub fn smps_enable(&mut self, en: bool) {
+        self.pwr.cr5.modify(|_, w| w.sdeb().bit(en));
     }
 
     pub fn sr1(&self) -> sr1::R {
@@ -449,284 +516,54 @@ impl Pwr {
     pub fn sr2(&self) -> sr2::R {
         self.pwr.sr2.read()
     }
-
-    pub fn scr<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&'w mut Scr) -> &'w mut Scr,
-    {
-        let mut c = Scr::new();
-
-        op(&mut c);
-
-        self.pwr.scr.write(|w| unsafe { w.bits(c.0) });
-    }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryCharging {
+    Disabled,
+    R1_5,
+    R5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(feature = "cm4")]
-config_reg_u32! {
-    R, Cr1R, PWR, cr1, [
-        lpms => (Lpms, u8, [2:0], "Low-Power mode selection"),
-        fpdr => (bool, bool, [4:4], "Flash memory power down mode during LPRun for CPUx\n\n\
-            Selects whether the flash memory is in power down mode or idle mode when in LPRun mode. (flash memory
-            can only be in power down mode when code is executed from SRAM). Flash memory is set
-            in power down mode only when the system is in LPRun mode, and the FPDR
-            bit from the other CPU too allows so.\n\n\
-            - `false`: Flash memory in idle mode when system is in LPRun mode\n\
-            - `true`: Flash memory in power down mode when system is in LPRun mode
-        "),
-        fpds => (bool, bool, [5:5], "Flash memory power down mode during LPSleep for CPUx\n\n\
-            This bit selects whether the flash memory is in power down mode or idle mode when both
-            CPUs are in Sleep mode. flash memory is set in power down mode only when the system is
-            in LPSleep mode and the FPDS bit of the other CPU also allows this.\n\n\
-            - `false`: Flash memory in Idle mode when system is in LPSleep mode\n\
-            - `true`: Flash memory in power down mode when system is in LPSleep mode
-        "),
-        dbp => (bool, bool, [8:8], "Disable backup domain write protection\n\n\
-                - `false`: Access to RTC and Backup registers disabled\n\
-                - `true`: Access to RTC and Backup registers enabled
-        "),
-        vos => (Vos, u8, [10:9], "Voltage scaling range selection"),
-        lpr => (bool, bool, [14:14], "Low-power run"),
-    ]
+pub enum Event {
+    BorhSmpsStepDownInBypass,
+    CriticalRadioPhaseEOA,
+    BleEOA,
+    _802EOA,
+    Cpu2Hold,
 }
 
-#[cfg(feature = "cm0p")]
-config_reg_u32! {
-    R, Cr1R, PWR, c2cr1, [
-        lpms => (Lpms, u8, [2:0], "Low-Power mode selection"),
-        fpdr => (bool, bool, [4:4], "Flash memory power down mode during LPRun for CPUx\n\n\
-            Selects whether the flash memory is in power down mode or idle mode when in LPRun mode. (flash memory
-            can only be in power down mode when code is executed from SRAM). Flash memory is set
-            in power down mode only when the system is in LPRun mode, and the FPDR
-            bit from the other CPU too allows so.\n\n\
-            - `false`: Flash memory in idle mode when system is in LPRun mode\n\
-            - `true`: Flash memory in power down mode when system is in LPRun mode
-        "),
-        fpds => (bool, bool, [5:5], "Flash memory power down mode during LPSleep for CPUx\n\n\
-            This bit selects whether the flash memory is in power down mode or idle mode when both
-            CPUs are in Sleep mode. flash memory is set in power down mode only when the system is
-            in LPSleep mode and the FPDS bit of the other CPU also allows this.\n\n\
-            - `false`: Flash memory in Idle mode when system is in LPSleep mode\n\
-            - `true`: Flash memory in power down mode when system is in LPSleep mode
-        "),
-        bleewkup => (bool, bool, [14:14], "BLE external wakeup\n\n\
-            When set this bit forces a wakeup of the BLE controller. It is automatically reset\n\
-            when BLE controller exits its sleep mode
-        "),
-        i802ewkup => (bool, bool, [15:15], "802.15.4 external wakeup signal\n\n\
-            When set this bit forces a wakeup of the 802.15.4 controller. It is automatically reset\n\
-            when 802.15.4 controller exits its sleep mode
-        "),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeupSource {
+    Wkup1,
+    Wkup2,
+    Wkup3,
+    Wkup4,
+    Wkup5,
+    #[cfg(feature = "cm0p")]
+    Ble,
+    #[cfg(feature = "cm0p")]
+    _802,
 }
 
-#[cfg(feature = "cm0p")]
-config_reg_u32! {
-    R, SharedCr1R, PWR, cr1, [
-        dbp => (bool, bool, [8:8], "Disable backup domain write protection\n\n\
-            In reset state, the RTC and backup registers are protected against parasitic write access.
-            This bit must be set to enable write access to these registers
-        "),
-        vos => (Vos, u8, [10:9], "Voltage scaling range selection"),
-        lpr => (bool, bool, [15:15], "Low-power run"),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Polarity {
+    /// Falling Edge
+    Low,
+    /// Rising Edge
+    High,
 }
 
-#[cfg(feature = "cm0p")]
-config_reg_u32! {
-    W, Cr1W, PWR, c2cr1, [
-        bleewkup => (_bleewkup, bool, bool, [14:14], "BLE external wakeup\n\n\
-            When set this bit forces a wakeup of the BLE controller. It is automatically reset\n\
-            when BLE controller exits its sleep mode
-        "),
-        _802ewkup => (__802ewkup, bool, bool, [15:15], "802.15.4 external wakeup signal\n\n\
-            When set this bit forces a wakeup of the 802.15.4 controller. It is automatically reset\n\
-            when 802.15.4 controller exits its sleep mode
-        "),
-    ]
-}
-
-config_reg_u32! {
-    RW, Cr2R, Cr2W, PWR, cr2, [
-        pvde => (_pvde, bool, bool, [0:0], "Programmable voltage detector enable"),
-        pls => (_pls, Pls, u8, [3:1], "Programmable voltage detector level selection\n\n\
-            Note: These bits are write-protected once PVDL (PVDLock) is set in SYSCFG_CBR register
-        "),
-        pvme1 => (_pvme1, bool, bool, [4:4], "Peripheral voltage monitoring 1 enable: V_{DDUSB} vs 1.2 V"),
-        pvme3 => (_pvme3, bool, bool, [6:6], "Peripheral voltafe monitoring 3 enable: V_{DDA} vs 1.62 V"),
-        usv => (_usv, bool, bool, [10:10], "V_{DDUSB} USB supply valid"),
-    ]
-}
-
-#[cfg(feature = "cm4")]
-config_reg_u32! {
-    RW, Cr3R, Cr3W, PWR, cr3, [
-        ewup1 => (_ewup1, bool, bool, [0:0], "Enable wakeup pin WKUP1 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP1 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP1 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        ewup2 => (_ewup2, bool, bool, [1:1], "Enable wakeup pin WKUP2 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP2 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP2 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        ewup3 => (_ewup3, bool, bool, [2:2], "Enable wakeup pin WKUP3 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP3 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP3 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        ewup4 => (_ewup4, bool, bool, [3:3], "Enable wakeup pin WKUP4 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP4 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP4 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        ewup5 => (_ewup5, bool, bool, [4:4], "Enable wakeup pin WKUP5 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP5 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP5 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        eborhsmpsfb => (_eborhsmpsfb, bool, bool, [8:8], "Enable BORH and SMPS step-down converter forced in Bypass interrupts for CPUx"),
-        rrs => (_rrs, bool, bool, [9:9], "SRAM2a retention in standby mode\n\n\
-            - `false`: SRAM2a powered off in standby mode (content is lost)\n\
-            - `true`: SRAM2a powered by the low power regulator in standby mode (content is kept)
-        "),
-        apc => (_apc, bool, bool, [10:10], "Apply pull-up and pull-down configuration from CPUx\n\n\
-            When this bit for CPUx or the APC bit for the other CPU is set, the I/O pull-up and pull-
-            down configurations defined in the PWR_PUCRx and PWR_PDCRx registers are applied.
-            When both bits are cleared, the PWR_PUCRx and PWR_PDCRx registers are not applied to
-            the I/Os
-        "),
-        ecpre => (_ecpre, bool, bool, [11:11], "Enable critical radio phase end of activity interrupt for CPUx"),
-        eblea => (_eblea, bool, bool, [12:12], "Enable BLE end of activity interrupt for CPUx"),
-        e802a => (_e802a, bool, bool, [13:13], "Enable 802.15.4 end of activity interrupt for CPUx"),
-        ec2h => (_ec2h, bool, bool, [14:14], "Enable CPU2 Hold interrupt for CPUx"),
-        eiwul => (_eiwul, bool, bool, [15:15], "Enable internal wakeup line for CPUx"),
-    ]
-}
-
-#[cfg(feature = "cm0p")]
-config_reg_u32! {
-    RW, Cr3R, Cr3W, PWR, cr3, [
-        ewup1 => (_ewup1, bool, bool, [0:0], "Enable wakeup pin WKUP1 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP1 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP1 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        ewup2 => (_ewup2, bool, bool, [1:1], "Enable wakeup pin WKUP2 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP2 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP2 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        ewup3 => (_ewup3, bool, bool, [2:2], "Enable wakeup pin WKUP3 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP3 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP3 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        ewup4 => (_ewup4, bool, bool, [3:3], "Enable wakeup pin WKUP4 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP4 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP4 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        ewup5 => (_ewup5, bool, bool, [4:4], "Enable wakeup pin WKUP5 for CPUx\n\n\
-            When this bit is set, the external wakeup pin WKUP5 is enabled and triggers an interrupt and
-            wakeup from Stop, Standby or Shutdown event when a rising or a falling edge occurs to
-            CPUx. The active edge is configured via the WP5 bit in the PWR control register 4
-            (PWR_CR4)
-        "),
-        eblewup => (_eblewup, bool, bool, [9:9], "Enable BLE host wakeup interrupt for CPU2"),
-        e802wup => (_e802wup, bool, bool, [10:10], "Enable 802.15.4 host wakeup interrupt for CPU2"),
-        apc => (_apc, bool, bool, [12:12], "Apply pull-up and pull-down configuration from CPUx\n\n\
-            When this bit for CPUx or the APC bit for the other CPU is set, the I/O pull-up and pull-
-            down configurations defined in the PWR_PUCRx and PWR_PDCRx registers are applied.
-            When both bits are cleared, the PWR_PUCRx and PWR_PDCRx registers are not applied to
-            the I/Os
-        "),
-        eiwul => (_eiwul, bool, bool, [15:15], "Enable internal wakeup line for CPUx"),
-    ]
-}
-
-config_reg_u32! {
-    RW, Cr4R, Cr4W, PWR, cr4, [
-        wp1 => (_wp1, bool, bool, [0:0], "Wakeup pin WKUP1 polarity\n\n\
-            - `false`: Detection on high level (rising edge)\n\
-            - `true`: Detection on low level (falling edge)
-        "),
-        wp2 => (_wp2, bool, bool, [1:1], "Wakeup pin WKUP2 polarity\n\n\
-            - `false`: Detection on high level (rising edge)\n\
-            - `true`: Detection on low level (falling edge)
-        "),
-        wp3 => (_wp3, bool, bool, [2:2], "Wakeup pin WKUP3 polarity\n\n\
-            - `false`: Detection on high level (rising edge)\n\
-            - `true`: Detection on low level (falling edge)
-        "),
-        wp4 => (_wp4, bool, bool, [3:3], "Wakeup pin WKUP4 polarity\n\n\
-            - `false`: Detection on high level (rising edge)\n\
-            - `true`: Detection on low level (falling edge)
-        "),
-        wp5 => (_wp5, bool, bool, [4:4], "Wakeup pin WKUP5 polarity\n\n\
-            - `false`: Detection on high level (rising edge)\n\
-            - `true`: Detection on low level (falling edge)
-        "),
-        vbe => (_vbe, bool, bool, [8:8], "V_{BAT} Battery charging enable"),
-        vbrs => (_vbrs, bool, bool, [9:9], "V_{BAT} battery charging resistor selection\n\n\
-            - `false`: Charge V_{BAT} through a 5 kOhm resistor\n\
-            - `true`: Charge V_{BAT} through a 1.5 kOhm resistor
-        "),
-        c2boot => (_c2boot, bool, bool, [15:15], "Boot CPU2 after reset or wakeup from stop or standby modes"),
-    ]
-}
-
-config_reg_u32! {
-    RW, Cr5R, Cr5W, PWR, cr5, [
-        smpsvos => (_smpsvos, u8, u8, [3:0], "SMPS step-down converter voltage output scaling\n\n\
-            These bits are initialized after Option byte loading with factory trimmed value to reach 1.5 V,
-            and can subsequently be overwritten by firmware.
-            SMPS step down output voltage step size is 50 mV.
-            If factory trimmed value - 0x8 gives 1.50 V on VFBSMSPS, to get 1.40 V 0x2 must be
-            subtracted from this value.
-            - 0x0 = minimum voltage level
-            - 0xF = maximum voltage level
-        "),
-        smpssc => (_smpssc, u8, u8, [6:4], "SMPS step-down converter supply startup current selection\n\n\
-            Startup current is limited to maximum 80 mA + SMPSSC * 20 mA
-        "),
-        borhc => (_borhc, bool, bool, [8:8], "BORH configuration selection\n\n\
-            - `false`: BORH generates a system reset\n\
-            - `true`:  BORH forces SMPS step-down converter Bypass mode (BORL still generates a system reset)
-        "),
-        smpsen => (_smpsen, bool, bool, [15:15], "Enable SMPS step-down converter SMPS mode enabled\n\n\
-            This bit is reset to 0 when SMPS step-down converter switching on the fly is enabled and the
-            VDD level drops below the BORH threshold
-        "),
-    ]
-}
-
-clear_status_reg_u32! {
-    Scr, [
-        cwuf1 => (0, "Clear wakeup flag 1"),
-        cwuf2 => (1, "Clear wakeup flag 2"),
-        cwuf3 => (2, "Clear wakeup flag 3"),
-        cwuf4 => (3, "Clear wakeup flag 4"),
-        cwuf5 => (4, "Clear wakeup flag 5"),
-        csmpsfbf => (7, "Clear SMPS step-down converter forced in Bypass interrupt flag"),
-        cborhf => (8, "Clear BORH interrupt flag"),
-        cblewuf => (9, "Clear BLE wakeup interrupt flag"),
-        c802wuf => (10, "Clear 802.15.4 wakeup interrupt flag"),
-        ccrpef => (11, "Clear critical radio phase end of activity interrupt flag"),
-        cbleaf => (12, "Clear BLE end of activity interrupt flag"),
-        c802af => (13, "Clear 802.15.4 end of activity interrupt flag"),
-        cc2hf => (14, "Clear CPU2 hold interrupt flag"),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Borh {
+    /// BORH generates a system reset
+    SystemReset,
+    /// BORH forces SMPS step-down converter bypass mode
+    ///
+    /// BORL still generates a system reset
+    SmpsBypass,
 }
 
 /// Low-Power mode selection for CPU1

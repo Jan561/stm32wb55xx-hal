@@ -97,7 +97,7 @@ bus! {
     #[cfg(feature = "cm0p")]
     APB3 => [E C2APB3ENR R APB3RSTR S C2APB3SMENR],
     #[cfg(feature = "cm0p")]
-    APB3_SHARED => [R APB3RSTR]
+    APB3SHARED => [R APB3RSTR]
 }
 
 macro_rules! enable {
@@ -274,4 +274,4 @@ pub struct RF;
 #[cfg(feature = "cm4")]
 reset!(RF => (APB3, rfrst));
 #[cfg(feature = "cm0p")]
-reset!(RF => (APB3_SHARED, rfrst));
+reset!(RF => (APB3SHARED, rfrst));

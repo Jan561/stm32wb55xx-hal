@@ -604,9 +604,8 @@ pins! {
 
 #[cfg(test)]
 mod test {
-    use fugit::RateExtU32;
-
     use super::I2c;
+    use fugit::RateExtU32;
 
     /// Runs a timing testcase over PCLK and I2C clock ranges
     fn i2c_timing_testcase<F>(f: F)
