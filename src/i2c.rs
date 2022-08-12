@@ -38,6 +38,7 @@ const RD_WRN_READ: bool = true;
 pub enum Start {
     Start,
     Restart,
+    Reload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +170,46 @@ impl<I2C, PINS> embedded_hal::i2c::ErrorType for I2c<'_, I2C, PINS> {
 pub enum Address {
     SevenBit(SevenBitAddress),
     TenBit(TenBitAddress),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextOp {
+    Start,
+    Restart,
+    Reload,
+    Stop,
+}
+
+impl NextOp {
+    fn start(self) -> Start {
+        match self {
+            Self::Start => Start::Start,
+            Self::Restart => Start::Restart,
+            Self::Reload => Start::Reload,
+            Self::Stop => unreachable!(),
+        }
+    }
+
+    fn stop(self) -> Stop {
+        match self {
+            Self::Start => unreachable!(),
+            Self::Restart => Stop::Software,
+            Self::Reload => Stop::Reload,
+            Self::Stop => Stop::Automatic,
+        }
+    }
+}
+
+macro_rules! next_op {
+    ($op:expr, $next:expr) => {{
+        if $next.is_none() {
+            NextOp::Stop
+        } else if matches!($op, Operation::Read(_)) == matches!($next, Some(Operation::Read(_))) {
+            NextOp::Reload
+        } else {
+            NextOp::Restart
+        }
+    }};
 }
 
 macro_rules! i2c {
@@ -339,71 +380,67 @@ macro_rules! i2c {
                         self.i2c.cr2.modify(|_, w| w.stop().set_bit());
                     }
 
-                    pub fn master_write_bytes(&mut self, addr: Address, bytes: &[u8], stop: Stop) {
-                        if bytes.len() > 255 {
-                            self.master_write(addr, 255, Stop::Reload);
-                        } else {
-                            self.master_write(addr, bytes.len(), stop);
-                        }
-
+                    pub fn master_write_bytes(&mut self, addr: Address, bytes: &[u8], start: Start, stop: Stop) {
+                        let mut begin = true;
                         let mut rem = bytes.len();
-                        let mut iter = bytes.chunks_exact(255);
+                        let mut iter = bytes.chunks(255);
 
                         for chunk in &mut iter {
-                            self.write_bytes(chunk);
+                            let stp = if rem > 255 {
+                                Stop::Reload
+                            } else {
+                                stop
+                            };
 
-                            rem -= 255;
+                            rem -= chunk.len();
 
-                            if rem > 255 {
-                                self.master_reload(255, Stop::Reload);
-                            } else if rem > 0 {
-                                self.master_reload(rem, stop);
+                            if begin {
+                                begin = false;
+
+                                match start {
+                                    Start::Start => self.master_write(addr, chunk.len(), stp),
+                                    Start::Restart => {
+                                        assert!(self.i2c.cr2.read().rd_wrn().bit() == RD_WRN_READ);
+
+                                        self.master_restart(chunk.len(), stp);
+                                    }
+                                    Start::Reload => {
+                                        assert!(self.i2c.cr2.read().rd_wrn().bit() == RD_WRN_WRITE);
+
+                                        self.master_reload(chunk.len(), stp);
+                                    }
+                                }
+                            } else {
+                                self.master_reload(chunk.len(), stp);
                             }
-                        }
 
-                        self.write_bytes(iter.remainder());
+                            self.write_bytes(chunk);
+                        }
                     }
 
-                    pub fn master_write_bytes_iter<'a, B>(&mut self, addr: Address, bytes: B, stop: Stop)
+                    pub fn master_write_bytes_iter<B>(&mut self, addr: Address, bytes: B, start: Start, stop: Stop)
                     where
                         B: IntoIterator<Item = u8>,
                     {
-                        let mut buf = [0; 256];
-                        let mut cnt = 0;
-
                         let mut iter = bytes.into_iter();
+                        let mut begin = true;
+                        let mut next = iter.next();
 
-                        for e in iter.by_ref().take(256) {
-                            buf[cnt] = e;
-                            cnt += 1;
-                        }
+                        while let Some(current) = next {
+                            next = iter.next();
 
-                        let (nbytes, stp) = if cnt == 256 {
-                            (255, Stop::Reload)
-                        } else {
-                            (cnt, stop)
-                        };
-
-                        self.master_write_bytes(addr, &buf[..nbytes], stp);
-
-                        while cnt == 256 {
-                            buf[0] = buf[255];
-                            cnt = 1;
-
-                            for e in iter.by_ref().take(255) {
-                                buf[cnt] = e;
-                                cnt += 1;
-                            }
-
-                            let (nbytes, stp) = if cnt == 256 {
-                                (255, Stop::Reload)
+                            let stp = if next.is_some() {
+                                Stop::Reload
                             } else {
-                                (cnt, stop)
+                                stop
                             };
 
-                            self.master_reload(nbytes, stp);
-
-                            self.write_bytes(&buf[..nbytes]);
+                            if begin {
+                                begin = false;
+                                self.master_write_bytes(addr, &[current], start, stp);
+                            } else {
+                                self.master_write_bytes(addr, &[current], Start::Reload, stp);
+                            }
                         }
                     }
 
@@ -419,33 +456,41 @@ macro_rules! i2c {
                     }
 
                     pub fn master_read_bytes(&mut self, addr: Address, buffer: &mut [u8], start: Start, stop: Stop) {
-                        let (nbytes, stp) = if buffer.len() > 255 {
-                            (255, Stop::Reload)
-                        } else {
-                            (buffer.len(), stop)
-                        };
-
-                        match start {
-                            Start::Start => self.master_read(addr, nbytes, stp),
-                            Start::Restart => self.master_restart(nbytes, stp),
-                        }
-
+                        let mut begin = true;
                         let mut rem = buffer.len();
-                        let mut iter = buffer.chunks_exact_mut(0xFF);
+                        let mut iter = buffer.chunks_mut(255);
 
                         for chunk in &mut iter {
-                            self.read_bytes(chunk);
+                            let stp = if rem > 255 {
+                                Stop::Reload
+                            } else {
+                                stop
+                            };
 
-                            rem -= 255;
+                            rem -= chunk.len();
 
-                            if rem > 255 {
-                                self.master_reload(255, Stop::Reload);
-                            } else if rem > 0 {
-                                self.master_reload(rem, stop);
+                            if begin {
+                                begin = false;
+
+                                match start {
+                                    Start::Start => self.master_read(addr, chunk.len(), stp),
+                                    Start::Restart => {
+                                        assert!(self.i2c.cr2.read().rd_wrn().bit() == RD_WRN_WRITE);
+
+                                        self.master_restart(chunk.len(), stp);
+                                    }
+                                    Start::Reload => {
+                                        assert!(self.i2c.cr2.read().rd_wrn().bit() == RD_WRN_READ);
+
+                                        self.master_reload(chunk.len(), stp);
+                                    }
+                                }
+                            } else {
+                                self.master_reload(chunk.len(), stp);
                             }
-                        }
 
-                        self.read_bytes(iter.into_remainder());
+                            self.read_bytes(chunk);
+                        }
                     }
 
                     fn read_bytes<'a, B>(&mut self, buffer: B)
@@ -470,7 +515,7 @@ macro_rules! i2c {
                             }
 
                             fn write(&mut self, addr: $addr, bytes: &[u8]) -> Result<(), Self::Error> {
-                                self.master_write_bytes(Address::$variant(addr), bytes, Stop::Automatic);
+                                self.master_write_bytes(Address::$variant(addr), bytes, Start::Start, Stop::Automatic);
 
                                 Ok(())
                             }
@@ -481,7 +526,7 @@ macro_rules! i2c {
                             {
                                 let addr = Address::$variant(addr);
 
-                                self.master_write_bytes_iter(addr, bytes, Stop::Automatic);
+                                self.master_write_bytes_iter(addr, bytes, Start::Start, Stop::Automatic);
 
                                 Ok(())
                             }
@@ -489,7 +534,7 @@ macro_rules! i2c {
                             fn write_read(&mut self, addr: $addr, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Self::Error> {
                                 let addr = Address::$variant(addr);
 
-                                self.master_write_bytes(addr, bytes, Stop::Software);
+                                self.master_write_bytes(addr, bytes, Start::Start, Stop::Software);
 
                                 self.master_read_bytes(addr, buffer, Start::Restart, Stop::Automatic);
 
@@ -502,22 +547,71 @@ macro_rules! i2c {
                             {
                                 let addr = Address::$variant(addr);
 
-                                self.master_write_bytes_iter(addr, bytes, Stop::Software);
+                                self.master_write_bytes_iter(addr, bytes, Start::Restart, Stop::Software);
 
                                 self.master_read_bytes(addr, buffer, Start::Restart, Stop::Automatic);
 
                                 Ok(())
                             }
 
-                            fn transaction<'a>(&mut self, _addr: $addr, _operations: &mut [Operation<'a>]) -> Result<(), Self::Error> {
-                                todo!()
+                            fn transaction<'a>(&mut self, addr: $addr, operations: &mut [Operation<'a>]) -> Result<(), Self::Error> {
+                                let len = operations.len();
+                                let addr = Address::$variant(addr);
+
+                                if len == 0 {
+                                    return Ok(());
+                                }
+
+                                let mut next_op = NextOp::Start;
+
+                                for i in 0..len {
+                                    let current_op = next_op;
+                                    let next = if i + 1 < len {
+                                        Some(&operations[i + 1])
+                                    } else {
+                                        None
+                                    };
+
+                                    next_op = next_op!(operations[i], next);
+
+                                    match &mut operations[i] {
+                                        Operation::Read(buf) => {
+                                            self.master_read_bytes(addr, buf, current_op.start(), next_op.stop());
+                                        }
+                                        Operation::Write(bytes) => {
+                                            self.master_write_bytes(addr, bytes, current_op.start(), next_op.stop());
+                                        }
+                                    }
+                                }
+
+                                Ok(())
                             }
 
-                            fn transaction_iter<'a, O>(&mut self, _addr: $addr, _operations: O) -> Result<(), Self::Error>
+                            fn transaction_iter<'a, O>(&mut self, addr: $addr, operations: O) -> Result<(), Self::Error>
                             where
                                 O: core::iter::IntoIterator<Item = Operation<'a>>,
                             {
-                                todo!()
+                                let addr = Address::$variant(addr);
+                                let mut iter = operations.into_iter();
+                                let mut next = iter.next();
+                                let mut next_op = NextOp::Start;
+
+                                while let Some(current) = next {
+                                    next = iter.next();
+                                    let current_op = next_op;
+                                    next_op = next_op!(current, next);
+
+                                    match current {
+                                        Operation::Read(buf) => {
+                                            self.master_read_bytes(addr, buf, current_op.start(), next_op.stop());
+                                        }
+                                        Operation::Write(bytes) => {
+                                            self.master_write_bytes(addr, bytes, current_op.start(), next_op.stop());
+                                        }
+                                    }
+                                }
+
+                                Ok(())
                             }
                         }
                     }
