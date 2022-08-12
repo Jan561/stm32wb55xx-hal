@@ -4,7 +4,7 @@ use crate::time::Hertz;
 use core::cmp::max;
 use core::marker::PhantomData;
 use embedded_hal::i2c::blocking::Operation;
-use embedded_hal::i2c::{SevenBitAddress, TenBitAddress};
+use embedded_hal::i2c::{NoAcknowledgeSource, SevenBitAddress, TenBitAddress};
 use fugit::RateExtU32;
 use paste::paste;
 use sealed::sealed;
@@ -52,7 +52,7 @@ pub enum Stop {
 pub enum Error {
     Bus,
     Arbitration,
-    NoAcknowledge(embedded_hal::i2c::NoAcknowledgeSource),
+    NoAcknowledge(NoAcknowledgeSource),
 }
 
 impl embedded_hal::i2c::Error for Error {
@@ -63,6 +63,17 @@ impl embedded_hal::i2c::Error for Error {
             Error::NoAcknowledge(nack) => embedded_hal::i2c::ErrorKind::NoAcknowledge(nack),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    Transmit,
+    Receive,
+    AddressMatch,
+    NotAcknowledge,
+    Stop,
+    TransferComplete,
+    Errors,
 }
 
 pub trait I2cExt: Sized {
@@ -199,6 +210,38 @@ macro_rules! next_op {
     }};
 }
 
+macro_rules! flush_txdr {
+    ($i2c:expr) => {{
+        if $i2c.isr.read().txis().bit() {
+            $i2c.txdr.write(|w| w.txdata().variant(0x0));
+        }
+
+        if !$i2c.isr.read().txe().bit() {
+            $i2c.isr.write(|w| w.txe().set_bit());
+        }
+    }};
+}
+
+macro_rules! busy_wait {
+    ($i2c:expr, $flag:ident, $variant:ident, $nack:ident) => {{
+        let isr = $i2c.isr.read();
+
+        while !isr.$flag().$variant() {
+            if isr.berr().bit() {
+                $i2c.icr.write(|w| w.berrcf().set_bit());
+                return Err(Error::Bus);
+            } else if isr.arlo().bit() {
+                $i2c.icr.write(|w| w.arlocf().set_bit());
+                return Err(Error::Arbitration);
+            } else if isr.nackf().bit() {
+                $i2c.icr.write(|w| w.nackcf().set_bit().stopcf().set_bit());
+                flush_txdr!($i2c);
+                return Err(Error::NoAcknowledge(NoAcknowledgeSource::$nack));
+            }
+        }
+    }};
+}
+
 macro_rules! i2c {
     ($($I2Cx:ident),* $(,)?) => {
         paste! {
@@ -242,6 +285,44 @@ macro_rules! i2c {
                             _phantom: PhantomData,
                             i2c,
                             pins,
+                        }
+                    }
+
+                    pub fn listen(&mut self, event: Event) {
+                        match event {
+                            Event::Transmit => self.i2c.cr1.modify(|_, w| w.txie().set_bit()),
+                            Event::Receive => self.i2c.cr1.modify(|_, w| w.rxie().set_bit()),
+                            Event::AddressMatch => self.i2c.cr1.modify(|_, w| w.addrie().set_bit()),
+                            Event::NotAcknowledge => self.i2c.cr1.modify(|_, w| w.nackie().set_bit()),
+                            Event::Stop => self.i2c.cr1.modify(|_, w| w.stopie().set_bit()),
+                            Event::TransferComplete => self.i2c.cr1.modify(|_, w| w.tcie().set_bit()),
+                            Event::Errors => self.i2c.cr1.modify(|_, w| w.errie().set_bit()),
+                        }
+                    }
+
+                    pub fn unlisten(&mut self, event: Event) {
+                        match event {
+                            Event::Transmit => self.i2c.cr1.modify(|_, w| w.txie().clear_bit()),
+                            Event::Receive => self.i2c.cr1.modify(|_, w| w.rxie().clear_bit()),
+                            Event::AddressMatch => self.i2c.cr1.modify(|_, w| w.addrie().clear_bit()),
+                            Event::NotAcknowledge => self.i2c.cr1.modify(|_, w| w.nackie().clear_bit()),
+                            Event::Stop => self.i2c.cr1.modify(|_, w| w.stopie().clear_bit()),
+                            Event::TransferComplete => self.i2c.cr1.modify(|_, w| w.tcie().clear_bit()),
+                            Event::Errors => self.i2c.cr1.modify(|_, w| w.errie().clear_bit()),
+                        }
+                    }
+
+                    pub fn clear_irq(&mut self, event: Event) {
+                        match event {
+                            Event::AddressMatch => self.i2c.icr.write(|w| w.addrcf().set_bit()),
+                            Event::NotAcknowledge => self.i2c.icr.write(|w| w.nackcf().set_bit()),
+                            Event::Stop => self.i2c.icr.write(|w| w.stopcf().set_bit()),
+                            Event::Errors => self.i2c.icr.write(|w| {
+                                w.berrcf().set_bit()
+                                    .arlocf().set_bit()
+                                    .ovrcf().set_bit()
+                            }),
+                            _ => (),
                         }
                     }
 
@@ -324,13 +405,13 @@ macro_rules! i2c {
                         });
                     }
 
-                    pub fn master_restart(&mut self, len: usize, stop: Stop) {
+                    pub fn master_restart(&mut self, len: usize, stop: Stop) -> Result<(), Error> {
                         assert!(len < 256);
 
                         let rw = !self.i2c.cr2.read().rd_wrn().bit();
                         let head10r = rw == RD_WRN_READ && self.i2c.cr2.read().add10().bit_is_set() == TEN_BIT_ADDR_MODE;
 
-                        while self.i2c.isr.read().tc().bit_is_clear() {}
+                        busy_wait!(self.i2c, tc, bit_is_set, Data);
 
                         self.i2c.cr2.modify(|_, w| {
                             w.head10r()
@@ -346,12 +427,14 @@ macro_rules! i2c {
                                 .autoend()
                                 .bit(stop == Stop::Automatic)
                         });
+
+                        Ok(())
                     }
 
-                    pub fn master_reload(&mut self, len: usize, stop: Stop) {
+                    pub fn master_reload(&mut self, len: usize, stop: Stop) -> Result<(), Error> {
                         assert!(len < 256);
 
-                        while self.i2c.isr.read().tcr().bit_is_clear() {}
+                        busy_wait!(self.i2c, tcr, bit_is_set, Data);
 
                         self.i2c.cr2.modify(|_, w| {
                             w.nbytes()
@@ -361,13 +444,15 @@ macro_rules! i2c {
                                 .autoend()
                                 .bit(stop == Stop::Automatic)
                         });
+
+                        Ok(())
                     }
 
                     pub fn master_stop(&mut self) {
                         self.i2c.cr2.modify(|_, w| w.stop().set_bit());
                     }
 
-                    pub fn master_write_bytes(&mut self, addr: Address, bytes: &[u8], start: Start, stop: Stop) {
+                    pub fn master_write_bytes(&mut self, addr: Address, bytes: &[u8], start: Start, stop: Stop) -> Result<(), Error> {
                         let mut begin = true;
                         let mut rem = bytes.len();
                         let mut iter = bytes.chunks(255);
@@ -382,30 +467,31 @@ macro_rules! i2c {
                             rem -= chunk.len();
 
                             if begin {
-                                begin = false;
-
                                 match start {
                                     Start::Start => self.master_write(addr, chunk.len(), stp),
                                     Start::Restart => {
                                         assert!(self.i2c.cr2.read().rd_wrn().bit() == RD_WRN_READ);
 
-                                        self.master_restart(chunk.len(), stp);
+                                        self.master_restart(chunk.len(), stp)?;
                                     }
                                     Start::Reload => {
                                         assert!(self.i2c.cr2.read().rd_wrn().bit() == RD_WRN_WRITE);
 
-                                        self.master_reload(chunk.len(), stp);
+                                        self.master_reload(chunk.len(), stp)?;
                                     }
                                 }
                             } else {
-                                self.master_reload(chunk.len(), stp);
+                                self.master_reload(chunk.len(), stp)?;
                             }
 
-                            self.write_bytes(chunk);
+                            self.write_bytes(chunk, begin)?;
+                            begin = false;
                         }
+
+                        Ok(())
                     }
 
-                    pub fn master_write_bytes_iter<B>(&mut self, addr: Address, bytes: B, start: Start, stop: Stop)
+                    pub fn master_write_bytes_iter<B>(&mut self, addr: Address, bytes: B, start: Start, stop: Stop) -> Result<(), Error>
                     where
                         B: IntoIterator<Item = u8>,
                     {
@@ -424,25 +510,34 @@ macro_rules! i2c {
 
                             if begin {
                                 begin = false;
-                                self.master_write_bytes(addr, &[current], start, stp);
+                                self.master_write_bytes(addr, &[current], start, stp)?;
                             } else {
-                                self.master_write_bytes(addr, &[current], Start::Reload, stp);
+                                self.master_write_bytes(addr, &[current], Start::Reload, stp)?;
                             }
                         }
+
+                        Ok(())
                     }
 
-                    fn write_bytes<'a, B>(&mut self, bytes: B)
+                    fn write_bytes<'a, B>(&mut self, bytes: B, mut first: bool) -> Result<(), Error>
                     where
                         B: IntoIterator<Item = &'a u8>,
                     {
                         for byte in bytes {
-                            while self.i2c.isr.read().txis().bit_is_clear() {}
+                            if first {
+                                first = false;
+                                busy_wait!(self.i2c, txis, bit_is_set, Address);
+                            } else {
+                                busy_wait!(self.i2c, txis, bit_is_set, Data);
+                            }
 
                             self.i2c.txdr.write(|w| w.txdata().variant(*byte));
                         }
+
+                        Ok(())
                     }
 
-                    pub fn master_read_bytes(&mut self, addr: Address, buffer: &mut [u8], start: Start, stop: Stop) {
+                    pub fn master_read_bytes(&mut self, addr: Address, buffer: &mut [u8], start: Start, stop: Stop) -> Result<(), Error> {
                         let mut begin = true;
                         let mut rem = buffer.len();
                         let mut iter = buffer.chunks_mut(255);
@@ -457,38 +552,47 @@ macro_rules! i2c {
                             rem -= chunk.len();
 
                             if begin {
-                                begin = false;
-
                                 match start {
                                     Start::Start => self.master_read(addr, chunk.len(), stp),
                                     Start::Restart => {
                                         assert!(self.i2c.cr2.read().rd_wrn().bit() == RD_WRN_WRITE);
 
-                                        self.master_restart(chunk.len(), stp);
+                                        self.master_restart(chunk.len(), stp)?;
                                     }
                                     Start::Reload => {
                                         assert!(self.i2c.cr2.read().rd_wrn().bit() == RD_WRN_READ);
 
-                                        self.master_reload(chunk.len(), stp);
+                                        self.master_reload(chunk.len(), stp)?;
                                     }
                                 }
                             } else {
-                                self.master_reload(chunk.len(), stp);
+                                self.master_reload(chunk.len(), stp)?;
                             }
 
-                            self.read_bytes(chunk);
+                            self.read_bytes(chunk, begin)?;
+                            begin = false;
                         }
+
+                        Ok(())
                     }
 
-                    fn read_bytes<'a, B>(&mut self, buffer: B)
+                    fn read_bytes<'a, B>(&mut self, buffer: B, mut first: bool) -> Result<(), Error>
                     where
                         B: IntoIterator<Item = &'a mut u8>,
                     {
                         for byte in buffer {
                             while self.i2c.isr.read().rxne().bit_is_clear() {}
+                            if first {
+                                first = false;
+                                busy_wait!(self.i2c, rxne, bit_is_set, Address);
+                            } else {
+                                busy_wait!(self.i2c, rxne, bit_is_set, Data);
+                            }
 
                             *byte = self.i2c.rxdr.read().rxdata().bits();
                         }
+
+                        Ok(())
                     }
                 }
 
@@ -496,34 +600,26 @@ macro_rules! i2c {
                     ($addr:ty, $variant:ident) => {
                         impl<PINS> embedded_hal::i2c::blocking::I2c<$addr> for I2c<'_, $I2Cx, PINS> {
                             fn read(&mut self, addr: $addr, buffer: &mut [u8]) -> Result<(), Self::Error> {
-                                self.master_read_bytes(Address::$variant(addr), buffer, Start::Start, Stop::Automatic);
-
-                                Ok(())
+                                self.master_read_bytes(Address::$variant(addr), buffer, Start::Start, Stop::Automatic)
                             }
 
                             fn write(&mut self, addr: $addr, bytes: &[u8]) -> Result<(), Self::Error> {
-                                self.master_write_bytes(Address::$variant(addr), bytes, Start::Start, Stop::Automatic);
-
-                                Ok(())
+                                self.master_write_bytes(Address::$variant(addr), bytes, Start::Start, Stop::Automatic)
                             }
 
                             fn write_iter<B>(&mut self, addr: $addr, bytes: B) -> Result<(), Self::Error>
                             where
                                 B: core::iter::IntoIterator<Item = u8>,
                             {
-                                let addr = Address::$variant(addr);
-
-                                self.master_write_bytes_iter(addr, bytes, Start::Start, Stop::Automatic);
-
-                                Ok(())
+                                self.master_write_bytes_iter(Address::$variant(addr), bytes, Start::Start, Stop::Automatic)
                             }
 
                             fn write_read(&mut self, addr: $addr, bytes: &[u8], buffer: &mut [u8]) -> Result<(), Self::Error> {
                                 let addr = Address::$variant(addr);
 
-                                self.master_write_bytes(addr, bytes, Start::Start, Stop::Software);
+                                self.master_write_bytes(addr, bytes, Start::Start, Stop::Software)?;
 
-                                self.master_read_bytes(addr, buffer, Start::Restart, Stop::Automatic);
+                                self.master_read_bytes(addr, buffer, Start::Restart, Stop::Automatic)?;
 
                                 Ok(())
                             }
@@ -534,9 +630,9 @@ macro_rules! i2c {
                             {
                                 let addr = Address::$variant(addr);
 
-                                self.master_write_bytes_iter(addr, bytes, Start::Restart, Stop::Software);
+                                self.master_write_bytes_iter(addr, bytes, Start::Restart, Stop::Software)?;
 
-                                self.master_read_bytes(addr, buffer, Start::Restart, Stop::Automatic);
+                                self.master_read_bytes(addr, buffer, Start::Restart, Stop::Automatic)?;
 
                                 Ok(())
                             }
@@ -563,10 +659,10 @@ macro_rules! i2c {
 
                                     match &mut operations[i] {
                                         Operation::Read(buf) => {
-                                            self.master_read_bytes(addr, buf, current_op.start(), next_op.stop());
+                                            self.master_read_bytes(addr, buf, current_op.start(), next_op.stop())?;
                                         }
                                         Operation::Write(bytes) => {
-                                            self.master_write_bytes(addr, bytes, current_op.start(), next_op.stop());
+                                            self.master_write_bytes(addr, bytes, current_op.start(), next_op.stop())?;
                                         }
                                     }
                                 }
@@ -590,10 +686,10 @@ macro_rules! i2c {
 
                                     match current {
                                         Operation::Read(buf) => {
-                                            self.master_read_bytes(addr, buf, current_op.start(), next_op.stop());
+                                            self.master_read_bytes(addr, buf, current_op.start(), next_op.stop())?;
                                         }
                                         Operation::Write(bytes) => {
-                                            self.master_write_bytes(addr, bytes, current_op.start(), next_op.stop());
+                                            self.master_write_bytes(addr, bytes, current_op.start(), next_op.stop())?;
                                         }
                                     }
                                 }
