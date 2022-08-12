@@ -92,23 +92,6 @@ impl<I2C, PINS> I2c<'_, I2C, PINS> {
         // 8192 = 16 * (256 + 256) is the highest scale factor we can achieve
         assert!(ratio <= 8192);
 
-        macro_rules! ratio_sda_min {
-            ($tf:expr) => {{
-                let i2cclk_khz = i2cclk.to_kHz();
-                ($tf - 50u32)
-                    .checked_sub(3_000_000 / i2cclk_khz)
-                    .map(|x| (x * i2cclk_khz + 999_999) / 1_000_000)
-                    .unwrap_or(0)
-            }};
-        }
-
-        macro_rules! ratio_scl_min {
-            ($tr:expr, $su:expr) => {{
-                let i2cclk_khz = i2cclk.to_kHz();
-                (i2cclk_khz * ($tr + $su) + 999_999) / 1_000_000
-            }};
-        }
-
         macro_rules! presc_reg {
             ($($ratio:expr, $ticks:expr);*) => {
                 [$(
@@ -132,8 +115,12 @@ impl<I2C, PINS> I2c<'_, I2C, PINS> {
                 let scll_min_ratio = (i2cclk.to_kHz() * $scll_min + 999_999) / 1_000_000;
                 let sclh_min_ratio = (i2cclk.to_kHz() * $sclh_min + 999_999) / 1_000_000;
 
-                let sdadel_ratio = ratio_sda_min!($tf);
-                let scldel_ratio = ratio_scl_min!($tr, $su);
+                let sdadel_ratio = ($tf - 50u32)
+                    .checked_sub(3_000_000 / i2cclk.to_kHz())
+                    .map(|x| (x * i2cclk.to_kHz() + 999_999) / 1_000_000)
+                    .unwrap_or(0);
+
+                let scldel_ratio = (i2cclk.to_kHz() * ($tr + $su) + 999_999) / 1_000_000;
 
                 let presc_reg = presc_reg!(scl_ratio, $ticks; scldel_ratio, 16; sdadel_ratio, 15);
                 let presc = (presc_reg + 1) as u32;
