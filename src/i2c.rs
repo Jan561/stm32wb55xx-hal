@@ -223,7 +223,7 @@ macro_rules! flush_txdr {
 }
 
 macro_rules! busy_wait {
-    ($i2c:expr, $flag:ident, $variant:ident, $nack:ident) => {{
+    ($i2c:expr, $flag:ident, $variant:ident, $nack:expr) => {{
         let isr = $i2c.isr.read();
 
         while !isr.$flag().$variant() {
@@ -236,7 +236,7 @@ macro_rules! busy_wait {
             } else if isr.nackf().bit() {
                 $i2c.icr.write(|w| w.nackcf().set_bit().stopcf().set_bit());
                 flush_txdr!($i2c);
-                return Err(Error::NoAcknowledge(NoAcknowledgeSource::$nack));
+                return Err(Error::NoAcknowledge($nack));
             }
         }
     }};
@@ -326,6 +326,14 @@ macro_rules! i2c {
                         }
                     }
 
+                    pub fn rx_dma(&mut self, en: bool) {
+                        self.i2c.cr1.modify(|_, w| w.rxdmaen().bit(en));
+                    }
+
+                    pub fn tx_dma(&mut self, en: bool) {
+                        self.i2c.cr1.modify(|_, w| w.txdmaen().bit(en));
+                    }
+
                     pub fn free(self) -> ($I2Cx, PINS) {
                         (self.i2c, self.pins)
                     }
@@ -411,7 +419,7 @@ macro_rules! i2c {
                         let rw = !self.i2c.cr2.read().rd_wrn().bit();
                         let head10r = rw == RD_WRN_READ && self.i2c.cr2.read().add10().bit_is_set() == TEN_BIT_ADDR_MODE;
 
-                        busy_wait!(self.i2c, tc, bit_is_set, Data);
+                        busy_wait!(self.i2c, tc, bit_is_set, NoAcknowledgeSource::Data);
 
                         self.i2c.cr2.modify(|_, w| {
                             w.head10r()
@@ -434,7 +442,7 @@ macro_rules! i2c {
                     pub fn master_reload(&mut self, len: usize, stop: Stop) -> Result<(), Error> {
                         assert!(len < 256);
 
-                        busy_wait!(self.i2c, tcr, bit_is_set, Data);
+                        busy_wait!(self.i2c, tcr, bit_is_set, NoAcknowledgeSource::Data);
 
                         self.i2c.cr2.modify(|_, w| {
                             w.nbytes()
@@ -488,6 +496,10 @@ macro_rules! i2c {
                             begin = false;
                         }
 
+                        if stop == Stop::Automatic {
+                            busy_wait!(self.i2c, tc, bit_is_set, NoAcknowledgeSource::Data);
+                        }
+
                         Ok(())
                     }
 
@@ -524,12 +536,14 @@ macro_rules! i2c {
                         B: IntoIterator<Item = &'a u8>,
                     {
                         for byte in bytes {
-                            if first {
+                            let nack = if first {
                                 first = false;
-                                busy_wait!(self.i2c, txis, bit_is_set, Address);
+                                NoAcknowledgeSource::Address
                             } else {
-                                busy_wait!(self.i2c, txis, bit_is_set, Data);
-                            }
+                                NoAcknowledgeSource::Data
+                            };
+
+                            busy_wait!(self.i2c, txis, bit_is_set, nack);
 
                             self.i2c.txdr.write(|w| w.txdata().variant(*byte));
                         }
@@ -573,6 +587,10 @@ macro_rules! i2c {
                             begin = false;
                         }
 
+                        if stop == Stop::Automatic {
+                            busy_wait!(self.i2c, tc, bit_is_set, NoAcknowledgeSource::Data);
+                        }
+
                         Ok(())
                     }
 
@@ -581,13 +599,14 @@ macro_rules! i2c {
                         B: IntoIterator<Item = &'a mut u8>,
                     {
                         for byte in buffer {
-                            while self.i2c.isr.read().rxne().bit_is_clear() {}
-                            if first {
+                            let nack = if first {
                                 first = false;
-                                busy_wait!(self.i2c, rxne, bit_is_set, Address);
+                                NoAcknowledgeSource::Address
                             } else {
-                                busy_wait!(self.i2c, rxne, bit_is_set, Data);
-                            }
+                                NoAcknowledgeSource::Data
+                            };
+
+                            busy_wait!(self.i2c, rxne, bit_is_set, nack);
 
                             *byte = self.i2c.rxdr.read().rxdata().bits();
                         }
