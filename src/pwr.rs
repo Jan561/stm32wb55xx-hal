@@ -45,7 +45,7 @@
 //! Note: Stop, Standby and Shutdown Modes are only entered, when both CPUs are in CStop mode
 
 use crate::pac::pwr::{sr1, sr2};
-use crate::pac::{PWR, RCC};
+use crate::pac::PWR;
 use crate::rcc::{self, Clocks};
 use cortex_m::peripheral::SCB;
 use fugit::RateExtU32;
@@ -86,8 +86,7 @@ impl Pwr {
         let old_vos: Vos = self.pwr.cr1.read().vos().bits().try_into().unwrap();
 
         if old_vos == Vos::Range1 && range == Vos::Range2 {
-            let rcc = unsafe { &*RCC::PTR };
-            rcc::set_flash_latency(rcc, clocks.sysclk().to_Hz());
+            rcc::set_flash_latency(clocks.hclk4());
         }
 
         self.pwr.cr1.modify(|_, w| w.vos().variant(range.into()));

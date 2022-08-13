@@ -3,14 +3,12 @@
 pub(crate) mod rec;
 
 use crate::flash::Latency;
-use crate::pac::rcc;
 use crate::pac::{FLASH, PWR, RCC};
+use crate::pwr::Pwr;
 use crate::pwr::Vos;
 use crate::time::Hertz;
 use fugit::RateExtU32;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
-use sealed::sealed;
-use stm32wb::stm32wb55::rcc::cifr;
 
 #[derive(Debug)]
 pub struct ValueError(&'static str);
@@ -26,6 +24,9 @@ pub enum Error {
     PllNoClockSelected,
     PllClkIllegalRange,
     MsiNotReady,
+    LseDisabled,
+    PrescalerNotApplied,
+    MsiPllDisabled,
 }
 
 macro_rules! value_error {
@@ -44,27 +45,34 @@ impl RccExt for RCC {
     }
 }
 
-#[sealed]
-pub trait RccBus {
-    type Bus;
+type VcoHertz = fugit::Rate<u32, 1, 3>;
+
+enum PllSrcX {
+    Msi(MsiRange),
+    Hsi16,
+    Hse(bool),
 }
 
-pub trait BusClock {
-    // TODO
+enum SysclkX {
+    Msi(MsiRange),
+    Hsi16,
+    Hse(bool),
+    Pll,
 }
 
-pub trait Enable: RccBus {
-    fn enable(rcc: &RCC);
-    fn disable(rcc: &RCC);
-}
-
-pub trait LPEnable: RccBus {
-    fn low_power_enable(rcc: &RCC);
-    fn low_power_disable(rcc: &RCC);
-}
-
-pub trait Reset: RccBus {
-    fn reset(rcc: &RCC);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    LsiReady,
+    LseReady,
+    MsiReady,
+    HsiReady,
+    HseReady,
+    PllReady,
+    Pllsai1Ready,
+    HseCSS,
+    LseCSS,
+    Hsi48Ready,
+    Lsi2Ready,
 }
 
 pub struct Rcc {
@@ -72,736 +80,1012 @@ pub struct Rcc {
 }
 
 impl Rcc {
-    pub fn cr<F>(&mut self, op: F) -> Result<(), Error>
-    where
-        F: for<'w> FnOnce(&CrR, &'w mut CrW) -> &'w mut CrW,
-    {
-        let r = CrR::read_from(&self.rcc);
-        let mut wc = CrW(r.0);
-
-        op(&r, &mut wc);
-
-        if r.0 == wc.0 {
-            return Ok(());
+    pub fn msi_enable(&mut self, en: bool) -> Result<(), Error> {
+        if !en && (self.is_sysclk(SysclkSwitch::Msi) || self.is_pllclk(PllSrc::Msi)) {
+            return Err(Error::ClockInUse);
         }
 
-        let cfgr = self.cfg_read();
-        let pllcfgr = self.pllcfgr_read();
+        Ok(())
+    }
+
+    pub fn msi_range(&mut self, range: MsiRange) -> Result<(), Error> {
+        let cr = self.rcc.cr.read();
+        let pllcfgr = self.rcc.pllcfgr.read();
+
+        if cr.msion().bit() && !cr.msirdy().bit() {
+            return Err(Error::MsiNotReady);
+        }
+
+        let is_sysclk = self.is_sysclk(SysclkSwitch::Msi);
+        let is_pll_clk = self.is_pllclk(PllSrc::Msi);
+
+        let vos = cortex_m::interrupt::free(|_| {
+            let pwr = unsafe { &*PWR::PTR };
+            pwr.cr1.read().vos().bits().try_into().unwrap()
+        });
+
+        if is_sysclk {
+            let cfgr = self.rcc.cfgr.read();
+            let extcfgr = self.rcc.extcfgr.read();
+
+            self.check_sysclk(
+                range.hertz(),
+                cfgr.hpre().bits().try_into().unwrap(),
+                extcfgr.c2hpre().bits().try_into().unwrap(),
+                extcfgr.shdhpre().bits().try_into().unwrap(),
+                vos,
+            )?;
+        }
+
+        let old_range = MsiRange::try_from(cr.msirange().bits()).unwrap();
+
+        if is_pll_clk {
+            let vco_in = Self::pll_m_checked(
+                PllSrcX::Msi(range),
+                vos,
+                pllcfgr.pllm().bits().try_into().unwrap(),
+            )?;
+
+            if cr.pllon().bit() {
+                Self::check_pll(
+                    vco_in,
+                    pllcfgr.plln().bits().try_into().unwrap(),
+                    pllcfgr.pllp().bits().try_into().unwrap(),
+                    pllcfgr.pllq().bits().try_into().unwrap(),
+                    pllcfgr.pllr().bits().try_into().unwrap(),
+                )?;
+            }
+
+            if cr.pllsai1on().bit() {
+                let pllsai1cfgr = self.rcc.pllsai1cfgr.read();
+
+                Self::check_pllsai1(
+                    vco_in,
+                    pllsai1cfgr.plln().bits().try_into().unwrap(),
+                    pllsai1cfgr.pllp().bits().try_into().unwrap(),
+                    pllsai1cfgr.pllq().bits().try_into().unwrap(),
+                    pllsai1cfgr.pllr().bits().try_into().unwrap(),
+                )?;
+            }
+        }
+
+        let flash_setup = || {
+            let sysclk = self.calculate_sysclk(SysclkX::Msi(range)).unwrap();
+            let shdpre = self.rcc.extcfgr.read().shdhpre().bits().try_into().unwrap();
+            let hclk4 = self.calculate_hclk4(sysclk, shdpre);
+
+            set_flash_latency(hclk4);
+        };
+
+        if is_sysclk && old_range < range {
+            flash_setup();
+        }
+
+        self.rcc
+            .cr
+            .modify(|_, w| w.msirange().variant(range.into()));
+
+        if is_sysclk && old_range > range {
+            flash_setup();
+        }
+
+        Ok(())
+    }
+
+    /// MSI PLL Mode / LSE calibration
+    pub fn msi_pll_mode(&mut self, en: bool) -> Result<(), Error> {
+        let bdcr = self.rcc.bdcr.read();
+
+        if en && (!bdcr.lseon().bit() || !bdcr.lserdy().bit()) {
+            return Err(Error::LseDisabled);
+        }
+
+        self.rcc.cr.modify(|_, w| w.msipllen().bit(en));
+
+        Ok(())
+    }
+
+    pub fn hsi_enable(&mut self, en: bool) -> Result<(), Error> {
+        if !en && (self.is_sysclk(SysclkSwitch::Hsi16) || self.is_pllclk(PllSrc::Hsi16)) {
+            return Err(Error::ClockInUse);
+        }
+
+        self.rcc.cr.modify(|_, w| w.hsion().bit(en));
+
+        Ok(())
+    }
+
+    pub fn hsi_ker_enable(&mut self, en: bool) {
+        self.rcc.cr.modify(|_, w| w.hsikeron().bit(en));
+    }
+
+    pub fn hsi_auto_start(&mut self, en: bool) {
+        self.rcc.cr.modify(|_, w| w.hsiasfs().bit(en));
+    }
+
+    pub fn hse_enable(&mut self, en: bool) {
+        self.rcc.cr.modify(|_, w| w.hseon().bit(en));
+    }
+
+    pub fn enable_hse_clock_security_system(&mut self) {
+        self.rcc.cr.modify(|_, w| w.csson().set_bit());
+    }
+
+    pub fn hse_divider_enabled(&mut self, div_by_2: bool) {
+        self.rcc.cr.modify(|_, w| w.hsepre().bit(div_by_2));
+    }
+
+    pub fn pll_enabled(&mut self, _: &Pwr, en: bool) -> Result<(), Error> {
+        let pllcfgr = self.rcc.pllcfgr.read();
+
+        if !en && self.is_sysclk(SysclkSwitch::Pll) {
+            return Err(Error::ClockInUse);
+        }
+
+        if en {
+            let pwr = unsafe { &*PWR::PTR };
+            let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+
+            let pllsrc: PllSrc = pllcfgr.pllsrc().bits().try_into().unwrap();
+
+            self.check_pllclk_rdy(pllsrc)?;
+
+            let pllsrcx = match pllsrc {
+                PllSrc::NoClock => unreachable!(),
+                PllSrc::Msi => {
+                    if self.rcc.cr.read().msipllen().bit_is_clear() {
+                        return Err(Error::MsiPllDisabled);
+                    }
+
+                    PllSrcX::Msi(self.rcc.cr.read().msirange().bits().try_into().unwrap())
+                }
+                PllSrc::Hsi16 => PllSrcX::Hsi16,
+                PllSrc::Hse => PllSrcX::Hse(self.rcc.cr.read().hsepre().bit()),
+            };
+
+            let vco_in =
+                Self::pll_m_checked(pllsrcx, vos, pllcfgr.pllm().bits().try_into().unwrap())?;
+
+            Self::check_pll(
+                vco_in,
+                pllcfgr.plln().bits().try_into().unwrap(),
+                pllcfgr.pllp().bits().try_into().unwrap(),
+                pllcfgr.pllq().bits().try_into().unwrap(),
+                pllcfgr.pllr().bits().try_into().unwrap(),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn pllsai1_enabled(&mut self, _: &Pwr, en: bool) -> Result<(), Error> {
+        let pllcfgr = self.rcc.pllcfgr.read();
+
+        if en {
+            let pwr = unsafe { &*PWR::PTR };
+            let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+
+            let pllsrc: PllSrc = pllcfgr.pllsrc().bits().try_into().unwrap();
+
+            self.check_pllclk_rdy(pllsrc)?;
+
+            let pllsrcx = match pllsrc {
+                PllSrc::NoClock => unreachable!(),
+                PllSrc::Msi => {
+                    PllSrcX::Msi(self.rcc.cr.read().msirange().bits().try_into().unwrap())
+                }
+                PllSrc::Hsi16 => PllSrcX::Hsi16,
+                PllSrc::Hse => PllSrcX::Hse(self.rcc.cr.read().hsepre().bit()),
+            };
+
+            let vco_in =
+                Self::pll_m_checked(pllsrcx, vos, pllcfgr.pllm().bits().try_into().unwrap())?;
+
+            let pllsai1cfgr = self.rcc.pllsai1cfgr.read();
+
+            Self::check_pllsai1(
+                vco_in,
+                pllsai1cfgr.plln().bits().try_into().unwrap(),
+                pllsai1cfgr.pllp().bits().try_into().unwrap(),
+                pllsai1cfgr.pllq().bits().try_into().unwrap(),
+                pllsai1cfgr.pllr().bits().try_into().unwrap(),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn sysclk(&mut self, _: &Pwr, sw: SysclkSwitch) -> Result<(), Error> {
+        let cr = self.rcc.cr.read();
+
+        let sysclk = |sysclk| {
+            let sysclkx = match sysclk {
+                SysclkSwitch::Msi => SysclkX::Msi(cr.msirange().bits().try_into().unwrap()),
+                SysclkSwitch::Hsi16 => SysclkX::Hsi16,
+                SysclkSwitch::Hse => SysclkX::Hse(cr.hsepre().bit()),
+                SysclkSwitch::Pll => SysclkX::Pll,
+            };
+
+            self.calculate_sysclk(sysclkx)
+                .ok_or(Error::SelectedClockNotEnabled)
+        };
+
+        let new_sysclk = sysclk(sw)?;
 
         let pwr = unsafe { &*PWR::PTR };
         let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
 
-        let pll_rising = !r.pllon() && wc._pllon();
-        let pllsai1_rising = !r.pllsai1on() && wc._pllsai1on();
-        let msi_range_changed = wc._msirange() != r.msirange().into();
-        let hse_pre_changed = wc._hsepre() != r.hsepre();
+        let cfgr = self.rcc.cfgr.read();
+        let extcfgr = self.rcc.extcfgr.read();
 
-        // MSI
+        self.check_sysclk_rdy(sw)?;
+        self.check_sysclk(
+            new_sysclk,
+            cfgr.hpre().bits().try_into().unwrap(),
+            extcfgr.c2hpre().bits().try_into().unwrap(),
+            extcfgr.shdhpre().bits().try_into().unwrap(),
+            vos,
+        )?;
 
-        // Check if clock shall be disabled but is currently used by sysclk or pll
-        if !wc._msion()
-            && (cfgr.sw() == SysclkSwitch::Msi
-                || cfgr.sws() == SysclkSwitch::Msi
-                || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Msi))
-        {
-            return Err(Error::ClockInUse);
-        }
+        let current_sysclk = sysclk(self.rcc.cfgr.read().sw().bits().try_into().unwrap()).unwrap();
 
-        // Check if PLL shall be enabled when selected clock source is disabled
-        if pll_rising
-            && (cfgr.sw() == SysclkSwitch::Msi || cfgr.sws() == SysclkSwitch::Msi)
-            && !(wc._msion() && r.msirdy())
-        {
-            return Err(Error::SelectedClockNotEnabled);
-        }
+        let flash_setup = || {
+            let shdpre = self.rcc.extcfgr.read().shdhpre().bits().try_into().unwrap();
+            let hclk4 = self.calculate_hclk4(new_sysclk, shdpre);
 
-        // HSI16
-
-        // Check if clock shall be disabled but is currently used by sysclk or pll
-        if !wc._hsion()
-            && (cfgr.sw() == SysclkSwitch::Hsi16
-                || cfgr.sws() == SysclkSwitch::Hsi16
-                || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Hsi16))
-        {
-            return Err(Error::ClockInUse);
-        }
-
-        // Check if PLL shall be enabled when selected clock source is disabled
-        if pll_rising
-            && (cfgr.sw() == SysclkSwitch::Hsi16 || cfgr.sws() == SysclkSwitch::Hsi16)
-            && !(wc._hsion() && r.hsirdy())
-        {
-            return Err(Error::SelectedClockNotEnabled);
-        }
-
-        // HSE
-
-        // Check if clock shall be disabled but is currently used by sysclk or pll
-        if !wc._hseon()
-            && (cfgr.sw() == SysclkSwitch::Hse
-                || cfgr.sws() == SysclkSwitch::Hse
-                || (r.pllon() && pllcfgr.pllsrc() == PllSrc::Hse))
-        {
-            return Err(Error::ClockInUse);
-        }
-
-        // Check if PLL shall be enabled when selected clock source is disabled
-        if pll_rising
-            && (cfgr.sw() == SysclkSwitch::Hse || cfgr.sws() == SysclkSwitch::Hse)
-            && !(wc._hseon() && r.hserdy())
-        {
-            return Err(Error::SelectedClockNotEnabled);
-        }
-
-        // PLL
-
-        // Check if clock shall be disabled but is currently used by sysclk
-        if !wc._pllon() && (cfgr.sw() == SysclkSwitch::Pll || cfgr.sws() == SysclkSwitch::Pll) {
-            return Err(Error::ClockInUse);
-        }
-
-        // Prevent enabling the PLL when no clock is selected
-        if (pll_rising || pllsai1_rising) && pllcfgr.pllsrc() == PllSrc::NoClock {
-            return Err(Error::PllNoClockSelected);
-        }
-
-        let check_pll = pll_rising || (r.pllon() && (msi_range_changed || hse_pre_changed));
-        let check_pllsai1 =
-            pllsai1_rising || (r.pllsai1on() && (msi_range_changed || hse_pre_changed));
-
-        let pll_m_in = match pllcfgr.pllsrc() {
-            PllSrc::NoClock => unreachable!(),
-            PllSrc::Msi => MsiRange::try_from(wc._msirange()).unwrap().hertz(),
-            PllSrc::Hsi16 => hsi16_hertz(),
-            PllSrc::Hse => hse_output_hertz(wc._hsepre()),
+            set_flash_latency(hclk4);
         };
 
-        // Check PLL M input clock when in Range 2
-        if (check_pll || check_pllsai1) && vos == Vos::Range2 {
-            if pll_m_in <= 16_000_000 {
-                return Err(Error::PllClkIllegalRange);
-            }
+        if new_sysclk > current_sysclk {
+            flash_setup();
         }
 
-        let vco_in_times_3 = pll_m_in * 3 / pllcfgr.pllm().div_factor() as u32;
+        self.rcc.cfgr.modify(|_, w| w.sw().variant(sw.into()));
 
-        // Check PLL VCO input frequency (after PLL M)
-        if (check_pll || check_pllsai1)
-            && (vco_in_times_3 > 48_000_000 || vco_in_times_3 < 8_000_000)
-        {
-            return Err(Error::PllClkIllegalRange);
+        if new_sysclk < current_sysclk {
+            flash_setup();
         }
-
-        let vco_out_times_3_main = match vco_in_times_3.checked_mul(pllcfgr.plln().get() as u32) {
-            Some(x) => x,
-            None => return Err(Error::PllClkIllegalRange),
-        };
-        let pllsai1cfgr = self.pllsai1cfgr_read();
-        let vco_out_times_3_sai1 = match vco_in_times_3.checked_mul(pllsai1cfgr.plln().get() as u32)
-        {
-            Some(x) => x,
-            None => return Err(Error::PllClkIllegalRange),
-        };
-
-        // Check PLL VCO output frequency (after PLL N) (for PLL MAIN and PLLSAI1)
-        if check_pll
-            && (vco_out_times_3_main > 344_000_000 * 3 || vco_out_times_3_main < 96_000_000 * 3)
-        {
-            return Err(Error::PllClkIllegalRange);
-        }
-
-        if check_pllsai1
-            && (vco_out_times_3_sai1 > 344_000_000 * 3 || vco_out_times_3_sai1 < 64_000_000 * 3)
-        {
-            return Err(Error::PllClkIllegalRange);
-        }
-
-        // Check PLLP, PLLQ, PLLR enabled outputs for PLL MAIN
-        let pllp_times_3_main = vco_out_times_3_main / pllcfgr.pllp().get() as u32;
-        if check_pll && pllp_times_3_main > 64_000_000 * 3 {
-            return Err(Error::PllClkIllegalRange);
-        }
-
-        let pllq_times_3_main = vco_out_times_3_main / pllcfgr.pllq().div_factor() as u32;
-        if check_pll && pllq_times_3_main > 64_000_000 * 3 {
-            return Err(Error::PllClkIllegalRange);
-        }
-
-        let pllr_times_3_main = vco_out_times_3_main / pllcfgr.pllr().div_factor() as u32;
-        if check_pll && pllr_times_3_main > 64_000_000 * 3 {
-            return Err(Error::PllClkIllegalRange);
-        }
-
-        // Check PLLP, PLLQ, PLLR enabled outputs for PLLSAI1
-        let pllp_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllp().get() as u32;
-        if check_pllsai1 && pllp_times_3_sai1 > 64_000_000 * 3 {
-            return Err(Error::PllClkIllegalRange);
-        }
-
-        let pllq_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllq().div_factor() as u32;
-        if check_pllsai1 && pllq_times_3_sai1 > 64_000_000 * 3 {
-            return Err(Error::PllClkIllegalRange);
-        }
-
-        let pllr_times_3_sai1 = vco_out_times_3_sai1 / pllsai1cfgr.pllr().div_factor() as u32;
-        if check_pllsai1 && pllr_times_3_sai1 > 64_000_000 * 3 {
-            return Err(Error::PllClkIllegalRange);
-        }
-
-        // MSIRANGE shall not be changed when MSI is on but not ready
-        if r.msion() && !r.msirdy() && wc._msirange() != r.msirange().into() {
-            return Err(Error::MsiNotReady);
-        }
-
-        // New MSIRANGE must be within the VOS limits if used as sysclk
-        if (cfgr.sw() == SysclkSwitch::Msi || cfgr.sws() == SysclkSwitch::Msi)
-            && vos == Vos::Range2
-            && MsiRange::R16M < wc._msirange().try_into().unwrap()
-        {
-            return Err(Error::SysclkTooHighVosRange2);
-        }
-
-        // HSEPRE flag must be set if HSE is used as sysclk in VOS Range 2
-        if (cfgr.sw() == SysclkSwitch::Hse || cfgr.sws() == SysclkSwitch::Hse)
-            && vos == Vos::Range2
-            && !wc._hsepre()
-        {
-            return Err(Error::SysclkTooHighVosRange2);
-        }
-
-        self.rcc.cr.modify(|_, w| {
-            w.msion()
-                .bit(wc._msion())
-                .msipllen()
-                .bit(wc._msipllen())
-                .msirange()
-                .variant(wc._msirange())
-                .hsion()
-                .bit(wc._hsion())
-                .hsikeron()
-                .bit(wc._hsikeron())
-                .hsiasfs()
-                .bit(wc._hsiasfs())
-                .hseon()
-                .bit(wc._hseon())
-                .csson()
-                .bit(wc._csson())
-                .hsepre()
-                .bit(wc._hsepre())
-                .pllon()
-                .bit(wc._pllon())
-                .pllsai1on()
-                .bit(wc._pllsai1on())
-        });
-
-        while wc._msion() && self.rcc.cr.read().msirdy().bit_is_clear() {}
-        while wc._hsion() && self.rcc.cr.read().hsirdy().bit_is_clear() {}
-        while wc._hseon() && self.rcc.cr.read().hserdy().bit_is_clear() {}
-        while wc._hsikeron() && self.rcc.cr.read().hsikerdy().bit_is_clear() {}
-        while wc._pllon() && self.rcc.cr.read().pllrdy().bit_is_clear() {}
-        while wc._pllsai1on() && self.rcc.cr.read().pllsai1rdy().bit_is_clear() {}
 
         Ok(())
     }
 
-    pub fn cr_read(&self) -> CrR {
-        CrR::read_from(&self.rcc)
-    }
+    pub fn hclk1_prescaler(&mut self, _: &Pwr, scale: PreScaler) -> Result<(), Error> {
+        let cr = self.rcc.cr.read();
+        let cfgr = self.rcc.cfgr.read();
 
-    pub fn cfg<F>(&mut self, op: F) -> Result<(), Error>
-    where
-        F: for<'w> FnOnce(&CfgrR, &'w mut CfgrW) -> &'w mut CfgrW,
-    {
-        let cfgr_r = CfgrR::read_from(&self.rcc);
-        let mut cfgr_w = CfgrW(cfgr_r.0);
-
-        op(&cfgr_r, &mut cfgr_w);
-
-        if cfgr_r.0 == cfgr_w.0 {
-            return Ok(());
-        }
-
-        let cr_r = CrR::read_from(&self.rcc);
-        let pllcfgr = PllCfgrR::read_from(&self.rcc);
-
-        let enabled = match cfgr_w._sw().try_into().unwrap() {
-            SysclkSwitch::Msi => cr_r.msion() && cr_r.msirdy(),
-            SysclkSwitch::Hsi16 => cr_r.hsion() && cr_r.hsirdy(),
-            SysclkSwitch::Hse => cr_r.hseon() && cr_r.hserdy(),
-            SysclkSwitch::Pll => cr_r.pllon() && cr_r.pllrdy(),
+        let sw: SysclkSwitch = cfgr.sw().bits().try_into().unwrap();
+        let sysclkx = match sw {
+            SysclkSwitch::Msi => SysclkX::Msi(cr.msirange().bits().try_into().unwrap()),
+            SysclkSwitch::Hsi16 => SysclkX::Hsi16,
+            SysclkSwitch::Hse => SysclkX::Hse(cr.hsepre().bit()),
+            SysclkSwitch::Pll => SysclkX::Pll,
         };
 
-        if !enabled {
-            return Err(Error::SelectedClockNotEnabled);
-        }
-
-        let current_sysclk = Self::sysclk_hertz(cfgr_r.sws(), &cr_r, &pllcfgr);
-        let new_sysclk = Self::sysclk_hertz(CfgrR(cfgr_w.0).sw(), &cr_r, &pllcfgr);
-
-        // Check vos
         let pwr = unsafe { &*PWR::PTR };
-        if new_sysclk > 16_000_000 && pwr.cr1.read().vos().bits() == Vos::Range2.into() {
+        let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+
+        let extcfgr = self.rcc.extcfgr.read();
+
+        let sysclk = self.calculate_sysclk(sysclkx).unwrap();
+
+        self.check_sysclk(
+            sysclk,
+            scale,
+            extcfgr.c2hpre().bits().try_into().unwrap(),
+            extcfgr.shdhpre().bits().try_into().unwrap(),
+            vos,
+        )?;
+
+        self.rcc.cfgr.modify(|_, w| w.hpre().variant(scale.into()));
+
+        Ok(())
+    }
+
+    pub fn hclk2_prescaler(&mut self, _: &Pwr, scale: PreScaler) -> Result<(), Error> {
+        let cr = self.rcc.cr.read();
+        let cfgr = self.rcc.cfgr.read();
+
+        let sw: SysclkSwitch = cfgr.sw().bits().try_into().unwrap();
+        let sysclkx = match sw {
+            SysclkSwitch::Msi => SysclkX::Msi(cr.msirange().bits().try_into().unwrap()),
+            SysclkSwitch::Hsi16 => SysclkX::Hsi16,
+            SysclkSwitch::Hse => SysclkX::Hse(cr.hsepre().bit()),
+            SysclkSwitch::Pll => SysclkX::Pll,
+        };
+
+        let pwr = unsafe { &*PWR::PTR };
+        let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+
+        let extcfgr = self.rcc.extcfgr.read();
+
+        let sysclk = self.calculate_sysclk(sysclkx).unwrap();
+
+        self.check_sysclk(
+            sysclk,
+            cfgr.hpre().bits().try_into().unwrap(),
+            scale,
+            extcfgr.shdhpre().bits().try_into().unwrap(),
+            vos,
+        )?;
+
+        self.rcc
+            .extcfgr
+            .modify(|_, w| w.c2hpre().variant(scale.into()));
+
+        Ok(())
+    }
+
+    pub fn hclk4_prescaler(&mut self, _: &Pwr, scale: PreScaler) -> Result<(), Error> {
+        let cr = self.rcc.cr.read();
+        let cfgr = self.rcc.cfgr.read();
+
+        let sw: SysclkSwitch = cfgr.sw().bits().try_into().unwrap();
+        let sysclkx = match sw {
+            SysclkSwitch::Msi => SysclkX::Msi(cr.msirange().bits().try_into().unwrap()),
+            SysclkSwitch::Hsi16 => SysclkX::Hsi16,
+            SysclkSwitch::Hse => SysclkX::Hse(cr.hsepre().bit()),
+            SysclkSwitch::Pll => SysclkX::Pll,
+        };
+
+        let pwr = unsafe { &*PWR::PTR };
+        let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+
+        let extcfgr = self.rcc.extcfgr.read();
+
+        let sysclk = self.calculate_sysclk(sysclkx).unwrap();
+
+        self.check_sysclk(
+            sysclk,
+            cfgr.hpre().bits().try_into().unwrap(),
+            extcfgr.c2hpre().bits().try_into().unwrap(),
+            scale,
+            vos,
+        )?;
+
+        self.rcc
+            .extcfgr
+            .modify(|_, w| w.c2hpre().variant(scale.into()));
+
+        Ok(())
+    }
+
+    pub fn pclk1_prescaler(&mut self, scale: PpreScaler) {
+        self.rcc.cfgr.modify(|_, w| w.ppre1().variant(scale.into()));
+    }
+
+    pub fn pclk2_prescaler(&mut self, scale: PpreScaler) {
+        self.rcc.cfgr.modify(|_, w| w.ppre2().variant(scale.into()));
+    }
+
+    pub fn rf_clock(&self) -> RfClock {
+        if self.rcc.extcfgr.read().rfcss().bit() {
+            RfClock::Hse
+        } else {
+            RfClock::Hsi16
+        }
+    }
+
+    pub fn stop_css_wakeup_clock(&mut self, clk: Stopwuck) {
+        self.rcc
+            .cfgr
+            .modify(|_, w| w.stopwuck().variant(clk == Stopwuck::Hsi16));
+    }
+
+    pub fn mco(&mut self, clk: McoSelector, scale: McoPrescaler) {
+        self.rcc
+            .cfgr
+            .modify(|_, w| w.mcopre().variant(scale.into()));
+        self.rcc.cfgr.modify(|_, w| w.mcosel().variant(clk.into()));
+    }
+
+    pub fn pll_src(&mut self, src: PllSrc) -> Result<(), Error> {
+        if self.rcc.cr.read().pllon().bit() || self.rcc.cr.read().pllsai1on().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllcfgr
+            .modify(|_, w| w.pllsrc().variant(src.into()));
+
+        Ok(())
+    }
+
+    pub fn pllm(&mut self, pllm: Pllm) -> Result<(), Error> {
+        if self.rcc.cr.read().pllon().bit() || self.rcc.cr.read().pllsai1on().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllcfgr
+            .modify(|_, w| w.pllm().variant(pllm.into()));
+
+        Ok(())
+    }
+
+    pub fn plln(&mut self, plln: Plln) -> Result<(), Error> {
+        if self.rcc.cr.read().pllon().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllcfgr
+            .modify(|_, w| w.plln().variant(plln.into()));
+
+        Ok(())
+    }
+
+    pub fn pllp(&mut self, pllp: Pllp) -> Result<(), Error> {
+        if self.rcc.cr.read().pllon().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllcfgr
+            .modify(|_, w| w.pllp().variant(pllp.into()));
+
+        Ok(())
+    }
+
+    pub fn pllp_enable(&mut self, en: bool) {
+        self.rcc.pllcfgr.modify(|_, w| w.pllpen().bit(en));
+    }
+
+    pub fn pllq(&mut self, pllq: PllQR) -> Result<(), Error> {
+        if self.rcc.cr.read().pllon().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllcfgr
+            .modify(|_, w| w.pllq().variant(pllq.into()));
+
+        Ok(())
+    }
+
+    pub fn pllq_enable(&mut self, en: bool) {
+        self.rcc.pllcfgr.modify(|_, w| w.pllqen().bit(en));
+    }
+
+    pub fn pllr(&mut self, pllr: PllQR) -> Result<(), Error> {
+        if self.rcc.cr.read().pllon().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllcfgr
+            .modify(|_, w| w.pllr().variant(pllr.into()));
+
+        Ok(())
+    }
+
+    pub fn pllr_enable(&mut self, en: bool) {
+        self.rcc.pllcfgr.modify(|_, w| w.pllren().bit(en));
+    }
+
+    pub fn pllsai1n(&mut self, plln: Pllsai1N) -> Result<(), Error> {
+        if self.rcc.cr.read().pllsai1on().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllsai1cfgr
+            .modify(|_, w| w.plln().variant(plln.into()));
+
+        Ok(())
+    }
+
+    pub fn pllsai1p(&mut self, pllp: Pllp) -> Result<(), Error> {
+        if self.rcc.cr.read().pllsai1on().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllsai1cfgr
+            .modify(|_, w| w.pllp().variant(pllp.into()));
+
+        Ok(())
+    }
+
+    pub fn pllsai1p_enable(&mut self, en: bool) {
+        self.rcc.pllsai1cfgr.modify(|_, w| w.pllpen().bit(en));
+    }
+
+    pub fn pllsai1q(&mut self, pllq: PllQR) -> Result<(), Error> {
+        if self.rcc.cr.read().pllsai1on().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllsai1cfgr
+            .modify(|_, w| w.pllq().variant(pllq.into()));
+
+        Ok(())
+    }
+
+    pub fn pllsai1q_enable(&mut self, en: bool) {
+        self.rcc.pllsai1cfgr.modify(|_, w| w.pllqen().bit(en));
+    }
+
+    pub fn pllsai1r(&mut self, pllr: PllQR) -> Result<(), Error> {
+        if self.rcc.cr.read().pllsai1on().bit() {
+            return Err(Error::PllEnabled);
+        }
+
+        self.rcc
+            .pllsai1cfgr
+            .modify(|_, w| w.pllr().variant(pllr.into()));
+
+        Ok(())
+    }
+
+    pub fn pllsai1r_enable(&mut self, en: bool) {
+        self.rcc.pllsai1cfgr.modify(|_, w| w.pllren().bit(en));
+    }
+
+    pub fn usart1_clock(&mut self, clock: Usart1sel) {
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.usart1sel().variant(clock.into()));
+    }
+
+    pub fn lp_uart1_clock(&mut self, clock: Usart1sel) {
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.lpuart1sel().variant(clock.into()));
+    }
+
+    pub fn i2c1_clock(&mut self, clock: I2cSel) {
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.i2c1sel().variant(clock.into()));
+    }
+
+    pub fn i2c3_clock(&mut self, clock: I2cSel) {
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.i2c3sel().variant(clock.into()));
+    }
+
+    pub fn lptim1_clock(&mut self, clock: LptimSel) {
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.lptim1sel().variant(clock.into()));
+    }
+
+    pub fn lptim2_clock(&mut self, clock: LptimSel) {
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.lptim2sel().variant(clock.into()));
+    }
+
+    pub fn sai1_clock(&mut self, clock: Sai1Sel) {
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.sai1sel().variant(clock.into()));
+    }
+
+    pub fn clock_48(&mut self, clock: Clk48Sel) {
+        // TODO: PLL check necessary??
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.clk48sel().variant(clock.into()));
+    }
+
+    pub fn adc_clock(&mut self, clock: AdcSel) {
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.adcsel().variant(clock.into()));
+    }
+
+    pub fn rng_clock(&mut self, clock: RngSel) {
+        self.rcc
+            .ccipr
+            .modify(|_, w| w.rngsel().variant(clock.into()));
+    }
+
+    pub fn listen(&mut self, event: Event, listen: bool) {
+        self.rcc.cier.modify(|_, w| match event {
+            Event::LsiReady => w.lsi1rdyie().bit(listen),
+            Event::LseReady => w.lserdyie().bit(listen),
+            Event::MsiReady => w.msirdyie().bit(listen),
+            Event::HsiReady => w.hsirdyie().bit(listen),
+            Event::HseReady => w.hserdyie().bit(listen),
+            Event::PllReady => w.pllrdyie().bit(listen),
+            Event::Pllsai1Ready => w.pllsai1rdyie().bit(listen),
+            Event::HseCSS => panic!("There is no HSECSS interrupt"),
+            Event::LseCSS => w.lsecssie().bit(listen),
+            Event::Hsi48Ready => w.hsi48rdyie().bit(listen),
+            Event::Lsi2Ready => w.lsi2rdyie().bit(listen),
+        });
+    }
+
+    pub fn clear_irq(&mut self, event: Event) {
+        self.rcc.cicr.write(|w| match event {
+            Event::LsiReady => w.lsi1rdyc().set_bit(),
+            Event::LseReady => w.lserdyc().set_bit(),
+            Event::MsiReady => w.msirdyc().set_bit(),
+            Event::HsiReady => w.hsirdyc().set_bit(),
+            Event::HseReady => w.hserdyc().set_bit(),
+            Event::PllReady => w.pllrdyc().set_bit(),
+            Event::Pllsai1Ready => w.pllsai1rdyc().set_bit(),
+            Event::HseCSS => w.hsecssc().set_bit(),
+            Event::LseCSS => w.lsecssc().set_bit(),
+            Event::Hsi48Ready => w.hsi48rdyc().set_bit(),
+            Event::Lsi2Ready => w.lsi2rdyc().set_bit(),
+        });
+    }
+
+    fn pll_m_checked(src: PllSrcX, vos: Vos, pllm: Pllm) -> Result<VcoHertz, Error> {
+        let pll_m_in = match src {
+            PllSrcX::Msi(r) => r.hertz(),
+            PllSrcX::Hsi16 => hsi16_hertz(),
+            PllSrcX::Hse(pre) => hse_output_hertz(pre),
+        };
+
+        if vos == Vos::Range2 && pll_m_in > 16.MHz::<1, 1>() {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        let vco_in = pll_m_in.convert() / pllm.div_factor() as u32;
+
+        if vco_in > 16.MHz::<1, 3>() || vco_in < fugit::Rate::<u32, 1, 3>::from_raw(8_000_000) {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        Ok(vco_in)
+    }
+
+    fn pll_m(src: PllSrcX, pllm: Pllm) -> VcoHertz {
+        let pll_m_in = match src {
+            PllSrcX::Msi(r) => r.hertz(),
+            PllSrcX::Hsi16 => hsi16_hertz(),
+            PllSrcX::Hse(pre) => hse_output_hertz(pre),
+        };
+
+        pll_m_in.convert() / pllm.div_factor() as u32
+    }
+
+    fn pll_n_checked(vco_in: VcoHertz, plln: Plln) -> Result<VcoHertz, Error> {
+        vco_in
+            .raw()
+            .checked_mul(plln.get() as u32)
+            .map(VcoHertz::from_raw)
+            .filter(|&v| v >= VcoHertz::MHz(96) && v <= VcoHertz::MHz(344))
+            .ok_or(Error::PllClkIllegalRange)
+    }
+
+    fn pll_n(vco_in: VcoHertz, plln: Plln) -> VcoHertz {
+        vco_in * plln.get() as u32
+    }
+
+    fn check_pll(
+        vco_in: VcoHertz,
+        plln: Plln,
+        pllp: Pllp,
+        pllq: PllQR,
+        pllr: PllQR,
+    ) -> Result<(), Error> {
+        let vco_out = Self::pll_n_checked(vco_in, plln)?;
+
+        let pllp = vco_out / pllp.get() as u32;
+        let pllq = vco_out / pllq.div_factor() as u32;
+        let pllr = vco_out / pllr.div_factor() as u32;
+
+        if [pllp, pllq, pllr].into_iter().max().unwrap() > VcoHertz::MHz(64) {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        Ok(())
+    }
+
+    fn pllsai1_n_checked(vco_in: VcoHertz, plln: Pllsai1N) -> Result<VcoHertz, Error> {
+        vco_in
+            .raw()
+            .checked_mul(plln.get() as u32)
+            .map(VcoHertz::from_raw)
+            .filter(|&v| v >= VcoHertz::MHz(64) && v <= VcoHertz::MHz(344))
+            .ok_or(Error::PllClkIllegalRange)
+    }
+
+    fn check_pllsai1(
+        vco_in: VcoHertz,
+        plln: Pllsai1N,
+        pllp: Pllp,
+        pllq: PllQR,
+        pllr: PllQR,
+    ) -> Result<(), Error> {
+        let vco_out = Self::pllsai1_n_checked(vco_in, plln)?;
+
+        let pllp = vco_out / pllp.get() as u32;
+        let pllq = vco_out / pllq.div_factor() as u32;
+        let pllr = vco_out / pllr.div_factor() as u32;
+
+        if [pllp, pllq, pllr].into_iter().max().unwrap() > VcoHertz::MHz(64) {
+            return Err(Error::PllClkIllegalRange);
+        }
+
+        Ok(())
+    }
+
+    fn pll_r(&self, vco_out: VcoHertz) -> Option<VcoHertz> {
+        let pllcfgr = self.rcc.pllcfgr.read();
+
+        if pllcfgr.pllren().bit_is_clear() {
+            return None;
+        }
+
+        let pllr: PllQR = pllcfgr.pllr().bits().try_into().unwrap();
+
+        Some(vco_out / pllr.div_factor() as u32)
+    }
+
+    fn calculate_sysclk(&self, sw: SysclkX) -> Option<Hertz> {
+        match sw {
+            SysclkX::Msi(range) => Some(range.hertz()),
+            SysclkX::Hsi16 => Some(hsi16_hertz()),
+            SysclkX::Hse(pre) => Some(hse_output_hertz(pre)),
+            SysclkX::Pll => {
+                let pllcfgr = self.rcc.pllcfgr.read();
+                let pllsrc: PllSrc = pllcfgr.pllsrc().bits().try_into().unwrap();
+
+                let pllsrcx = match pllsrc {
+                    PllSrc::NoClock => return None,
+                    PllSrc::Msi => {
+                        PllSrcX::Msi(self.rcc.cr.read().msirange().bits().try_into().unwrap())
+                    }
+                    PllSrc::Hsi16 => PllSrcX::Hsi16,
+                    PllSrc::Hse => PllSrcX::Hse(self.rcc.cr.read().hsepre().bit()),
+                };
+                let pllm = pllcfgr.pllm().bits().try_into().unwrap();
+                let plln = pllcfgr.plln().bits().try_into().unwrap();
+
+                let vco_in = Self::pll_m(pllsrcx, pllm);
+                let vco_out = Self::pll_n(vco_in, plln);
+
+                self.pll_r(vco_out).map(|x| x.convert())
+            }
+        }
+    }
+
+    fn check_sysclk(
+        &self,
+        sysclk: Hertz,
+        hpre: PreScaler,
+        c2hpre: PreScaler,
+        shdpre: PreScaler,
+        vos: Vos,
+    ) -> Result<(), Error> {
+        self.check_hclk1(sysclk, hpre, vos)?;
+        self.check_hclk2(sysclk, c2hpre, vos)?;
+        self.check_hclk4(sysclk, shdpre, vos)?;
+
+        Ok(())
+    }
+
+    fn calculate_hclk1(&self, sysclk: Hertz, hpre: PreScaler) -> Hertz {
+        sysclk / hpre.div_scale() as u32
+    }
+
+    fn check_hclk1(&self, sysclk: Hertz, hpre: PreScaler, vos: Vos) -> Result<(), Error> {
+        if self.rcc.cfgr.read().hpref().bit_is_clear() {
+            return Err(Error::PrescalerNotApplied);
+        }
+        if vos == Vos::Range2 && sysclk > 16.MHz::<1, 1>() * hpre.div_scale() as u32 {
             return Err(Error::SysclkTooHighVosRange2);
         }
 
-        if current_sysclk < new_sysclk {
-            // Increase CPU frequency
-            set_flash_latency(&self.rcc, new_sysclk);
+        Ok(())
+    }
+
+    fn calculate_hclk2(&self, sysclk: Hertz, c2hpre: PreScaler) -> Hertz {
+        sysclk / c2hpre.div_scale() as u32
+    }
+
+    fn check_hclk2(&self, sysclk: Hertz, c2hpre: PreScaler, vos: Vos) -> Result<(), Error> {
+        if self.rcc.extcfgr.read().c2hpref().bit_is_clear() {
+            return Err(Error::PrescalerNotApplied);
         }
-
-        self.rcc.cfgr.modify(|_, w| {
-            w.sw()
-                .variant(cfgr_w._sw())
-                .hpre()
-                .variant(cfgr_w._hpre())
-                .ppre1()
-                .variant(cfgr_w._ppre1())
-                .ppre2()
-                .variant(cfgr_w._ppre2())
-                .stopwuck()
-                .bit(cfgr_w._stopwuck())
-                .mcosel()
-                .variant(cfgr_w._mcosel())
-                .mcopre()
-                .variant(cfgr_w._mcopre())
-        });
-
-        while self.rcc.cfgr.read().sws().bits() != cfgr_w._sw()
-            || self.rcc.cfgr.read().hpref().bit_is_set()
-            || self.rcc.cfgr.read().ppre1f().bit_is_set()
-            || self.rcc.cfgr.read().ppre2f().bit_is_set()
-        {}
-
-        if current_sysclk > new_sysclk {
-            // Decrease CPU frequency
-            set_flash_latency(&self.rcc, new_sysclk);
+        if vos == Vos::Range2 && sysclk > 16.MHz::<1, 1>() * c2hpre.div_scale() as u32 {
+            return Err(Error::SysclkTooHighVosRange2);
         }
 
         Ok(())
     }
 
-    pub fn cfg_read(&self) -> CfgrR {
-        CfgrR::read_from(&self.rcc)
+    fn calculate_hclk4(&self, sysclk: Hertz, shdpre: PreScaler) -> Hertz {
+        sysclk / shdpre.div_scale() as u32
     }
 
-    pub fn pllcfgr<F>(&mut self, op: F) -> Result<(), Error>
-    where
-        F: for<'w> FnOnce(&PllCfgrR, &'w mut PllCfgrW) -> &'w mut PllCfgrW,
-    {
-        let r = PllCfgrR::read_from(&self.rcc);
-        let mut wc = PllCfgrW(r.0);
-
-        op(&r, &mut wc);
-
-        if (wc._pllsrc() != r.pllsrc().into() || wc._pllm() != r.pllm().into())
-            && (self.rcc.cr.read().pllon().bit_is_set()
-                || self.rcc.cr.read().pllsai1on().bit_is_set())
-        {
-            return Err(Error::PllEnabled);
+    fn check_hclk4(&self, sysclk: Hertz, shdpre: PreScaler, vos: Vos) -> Result<(), Error> {
+        if self.rcc.extcfgr.read().shdhpref().bit_is_clear() {
+            return Err(Error::PrescalerNotApplied);
         }
-
-        if (wc._plln() != r.plln().into()
-            || wc._pllp() != r.pllp().into()
-            || wc._pllq() != r.pllq().into()
-            || wc._pllr() != r.pllr().into())
-            && self.rcc.cr.read().pllon().bit_is_set()
-        {
-            return Err(Error::PllEnabled);
+        if vos == Vos::Range2 && sysclk > 16.MHz::<1, 1>() * shdpre.div_scale() as u32 {
+            return Err(Error::SysclkTooHighVosRange2);
         }
-
-        self.rcc.pllcfgr.modify(|_, w| {
-            w.pllsrc()
-                .variant(wc._pllsrc())
-                .pllm()
-                .variant(wc._pllm())
-                .plln()
-                .variant(wc._plln())
-                .pllpen()
-                .bit(wc._pllpen())
-                .pllp()
-                .variant(wc._pllp())
-                .pllqen()
-                .bit(wc._pllqen())
-                .pllq()
-                .variant(wc._pllq())
-                .pllren()
-                .bit(wc._pllren())
-                .pllr()
-                .variant(wc._pllr())
-        });
 
         Ok(())
     }
 
-    pub fn pllcfgr_read(&self) -> PllCfgrR {
-        PllCfgrR::read_from(&self.rcc)
+    fn is_sysclk(&self, clk: SysclkSwitch) -> bool {
+        let cfgr = self.rcc.cfgr.read();
+
+        cfgr.sw().bits() == clk.into() || cfgr.sws().bits() == clk.into()
     }
 
-    pub fn pllsai1cfgr<F>(&mut self, op: F) -> Result<(), Error>
-    where
-        F: for<'w> FnOnce(&Pllsai1CfgrR, &'w mut Pllsai1CfgrW) -> &'w mut Pllsai1CfgrW,
-    {
-        let r = Pllsai1CfgrR::read_from(&self.rcc);
-        let mut wc = Pllsai1CfgrW(r.0);
+    fn is_pllclk(&self, clk: PllSrc) -> bool {
+        let cr = self.rcc.cr.read();
+        let pllcfgr = self.rcc.pllcfgr.read();
 
-        op(&r, &mut wc);
-
-        if r.0 == wc.0 {
-            return Ok(());
-        }
-
-        if (wc._plln() != r.plln().into()
-            || wc._pllp() != r.pllp().into()
-            || wc._pllq() != r.pllq().into()
-            || wc._pllr() != r.pllr().into())
-            && self.rcc.cr.read().pllsai1on().bit_is_set()
-        {
-            return Err(Error::PllEnabled);
-        }
-
-        self.rcc.pllsai1cfgr.modify(|_, w| unsafe { w.bits(wc.0) });
-
-        Ok(())
+        (cr.pllon().bit() || cr.pllsai1on().bit()) && pllcfgr.pllsrc().bits() == clk.into()
     }
 
-    pub fn pllsai1cfgr_read(&self) -> Pllsai1CfgrR {
-        Pllsai1CfgrR::read_from(&self.rcc)
-    }
-
-    pub fn ext_cfg<F>(&mut self, op: F)
-    where
-        F: for<'w> FnOnce(&ExtCfgrR, &'w mut ExtCfgrW) -> &'w mut ExtCfgrW,
-    {
-        let r = ExtCfgrR::read_from(&self.rcc);
-        let mut wc = ExtCfgrW::read_from(&self.rcc);
-
-        op(&r, &mut wc);
-
-        self.rcc.extcfgr.modify(|_, w| {
-            w.shdhpre()
-                .variant(wc._shdhpre())
-                .c2hpre()
-                .variant(wc._c2hpre())
-        });
-
-        while self.rcc.extcfgr.read().shdhpref().bit_is_set()
-            || self.rcc.extcfgr.read().c2hpref().bit_is_set()
-        {}
-    }
-
-    pub fn ext_cfg_read(&self) -> ExtCfgrR {
-        ExtCfgrR::read_from(&self.rcc)
-    }
-
-    pub fn cier<F>(&mut self, op: F)
-    where
-        F: for<'w> FnOnce(&CierR, &'w mut CierW) -> &'w mut CierW,
-    {
-        let r = CierR::read_from(&self.rcc);
-        let mut wc = CierW(r.0);
-
-        op(&r, &mut wc);
-
-        self.rcc.cier.modify(|_, w| {
-            w.lsi1rdyie()
-                .bit(wc._lsi1rdyie())
-                .lserdyie()
-                .bit(wc._lserdyie())
-                .msirdyie()
-                .bit(wc._msirdyie())
-                .hsirdyie()
-                .bit(wc._hsirdyie())
-                .hserdyie()
-                .bit(wc._hserdyie())
-                .pllrdyie()
-                .bit(wc._pllrdyie())
-                .pllsai1rdyie()
-                .bit(wc._pllsai1rdyie())
-                .lsecssie()
-                .bit(wc._lsecssie())
-                .hsi48rdyie()
-                .bit(wc._hsi48rdyie())
-                .lsi2rdyie()
-                .bit(wc._lsi2rdyie())
-        });
-    }
-
-    pub fn cier_read(&self) -> CierR {
-        CierR::read_from(&self.rcc)
-    }
-
-    pub fn cifr_read(&self) -> cifr::R {
-        self.rcc.cifr.read()
-    }
-
-    pub fn cicr<F>(&self, op: F)
-    where
-        F: FnOnce(&mut Cicr) -> &mut Cicr,
-    {
-        let mut c = Cicr::new();
-
-        op(&mut c);
-
-        self.rcc.cicr.write(|w| unsafe { w.bits(c.0) });
-    }
-
-    pub fn csr<F>(&mut self, op: F) -> Result<(), Error>
-    where
-        F: for<'w> FnOnce(&CsrR, &'w mut CsrW) -> &'w mut CsrW,
-    {
-        let r = CsrR::read_from(&self.rcc);
-        let mut wc = CsrW(r.0);
-
-        op(&r, &mut wc);
-
-        if wc._lsi2trim() != r.lsi2trim() && r.lsi2on() {
-            return Err(Error::ClockInUse);
-        }
-
-        self.rcc.csr.modify(|_, w| unsafe { w.bits(wc.0) });
-
-        Ok(())
-    }
-
-    pub fn csr_read(&self) -> CsrR {
-        CsrR::read_from(&self.rcc)
-    }
-
-    pub fn ccip<F>(&mut self, op: F)
-    where
-        F: for<'w> FnOnce(&CcipR, &'w mut CcipW) -> &'w mut CcipW,
-    {
-        let r = CcipR::read_from(&self.rcc);
-        let mut wc = CcipW(r.0);
-
-        op(&r, &mut wc);
-
-        unsafe {
-            self.rcc.ccipr.modify(|_, w| w.bits(wc.0));
-        }
-    }
-
-    pub fn ccip_read(&self) -> CcipR {
-        CcipR::read_from(&self.rcc)
-    }
-
-    pub fn smps_cr<F>(&mut self, op: F) -> Result<(), Error>
-    where
-        F: for<'w> FnOnce(&SmpsCrR, &'w mut SmpsCrW) -> &'w mut SmpsCrW,
-    {
-        let r = SmpsCrR::read_from(&self.rcc);
-        let mut wc = SmpsCrW(r.0);
-
-        op(&r, &mut wc);
-
-        if wc._smpssel() == Smpssel::Msi.into() {
-            let msi_range = self.cr_read().msirange();
-
-            match msi_range {
-                MsiRange::R24M => {
-                    if wc._smpsdiv() == Smpsdiv::S4MHz.into() {
-                        return Err(Error::SmpsMsi24MhzTo4MhzIllegal);
-                    }
-                }
-                MsiRange::R16M | MsiRange::R32M | MsiRange::R48M => (),
-                _ => return Err(Error::SmpsMsiUnsupportedRange),
-            }
-        }
-
-        self.rcc.smpscr.modify(|_, w| {
-            w.smpssel()
-                .variant(wc._smpssel())
-                .smpsdiv()
-                .variant(wc._smpsdiv())
-        });
-
-        while self.rcc.smpscr.read().smpssws().bits() != wc._smpssel() {}
-
-        Ok(())
-    }
-
-    pub fn smps_cr_read(&self) -> SmpsCrR {
-        SmpsCrR::read_from(&self.rcc)
-    }
-
-    pub fn current_sysclk_hertz(&self) -> u32 {
-        Self::sysclk_hertz(self.cfg_read().sws(), &self.cr_read(), &self.pllcfgr_read())
-    }
-
-    fn sysclk_hertz(sw: SysclkSwitch, cr_r: &CrR, pllcfgr: &PllCfgrR) -> u32 {
-        match sw {
-            SysclkSwitch::Msi => Self::msi_hertz(cr_r),
-            SysclkSwitch::Hsi16 => hsi16_hertz(),
-            SysclkSwitch::Hse => hse_output_hertz(cr_r.hsepre()),
-            SysclkSwitch::Pll => {
-                let src = match pllcfgr.pllsrc() {
-                    PllSrc::NoClock => 0,
-                    PllSrc::Msi => Self::msi_hertz(cr_r),
-                    PllSrc::Hsi16 => hsi16_hertz(),
-                    PllSrc::Hse => hse_hertz(),
-                } as u64;
-
-                let pllm = pllcfgr.pllm().div_factor() as u64;
-                let plln = pllcfgr.plln().get() as u64;
-                let pllr = pllcfgr.pllr().div_factor() as u64;
-
-                let voc = src * plln / pllm;
-                (voc / pllr) as u32
-            }
-        }
-    }
-
-    pub fn current_hclk1(&self) -> u32 {
-        let sysclk = self.current_sysclk_hertz();
-
-        Self::hclk1(sysclk, &self.cfg_read())
-    }
-
-    fn hclk1(sysclk: u32, cfgr: &CfgrR) -> u32 {
-        if cfgr.hpref() {
-            let hpre = cfgr.hpre().div_scale() as u32;
-
-            sysclk / hpre
+    fn check_sysclk_rdy(&self, sysclk: SysclkSwitch) -> Result<(), Error> {
+        if self.sysclk_is_rdy(sysclk) {
+            Ok(())
         } else {
-            sysclk
+            Err(Error::SelectedClockNotEnabled)
         }
     }
 
-    pub fn current_hclk2(&self) -> u32 {
-        let sysclk = self.current_sysclk_hertz();
+    fn sysclk_is_rdy(&self, sysclk: SysclkSwitch) -> bool {
+        let cr = self.rcc.cr.read();
 
-        Self::hclk2(sysclk, &ExtCfgrR::read_from(&self.rcc))
+        match sysclk {
+            SysclkSwitch::Msi => cr.msirdy().bit(),
+            SysclkSwitch::Hsi16 => cr.hsirdy().bit() || cr.hsikerdy().bit(),
+            SysclkSwitch::Hse => cr.hserdy().bit(),
+            SysclkSwitch::Pll => cr.pllrdy().bit(),
+        }
     }
 
-    fn hclk2(sysclk: u32, ext: &ExtCfgrR) -> u32 {
-        let prescaler = u8::from(ext.c2hpre()) as u32;
-
-        sysclk / prescaler
-    }
-
-    pub fn current_hclk4(&self) -> u32 {
-        let sysclk = self.current_sysclk_hertz();
-
-        Self::hclk4(sysclk, &ExtCfgrR::read_from(&self.rcc))
-    }
-
-    fn hclk4(sysclk: u32, ext: &ExtCfgrR) -> u32 {
-        let prescaler = u8::from(ext.shdhpre()) as u32;
-
-        sysclk / prescaler
-    }
-
-    pub fn current_pclk1(&self) -> u32 {
-        let sysclk = self.current_sysclk_hertz();
-
-        Self::pclk1(sysclk, &self.cfg_read())
-    }
-
-    fn pclk1(sysclk: u32, cfgr: &CfgrR) -> u32 {
-        let hclk1 = Self::hclk1(sysclk, cfgr);
-
-        if cfgr.ppre1f() {
-            let ppre1 = cfgr.ppre1().div_scale() as u32;
-
-            hclk1 / ppre1
+    fn check_pllclk_rdy(&self, clk: PllSrc) -> Result<(), Error> {
+        if self.pllclk_is_rdy(clk) {
+            Ok(())
         } else {
-            hclk1
+            Err(Error::SelectedClockNotEnabled)
         }
     }
 
-    pub fn current_pclk2(&self) -> u32 {
-        let sysclk = self.current_sysclk_hertz();
+    fn pllclk_is_rdy(&self, clk: PllSrc) -> bool {
+        let cr = self.rcc.cr.read();
 
-        Self::pclk2(sysclk, &self.cfg_read())
-    }
-
-    fn pclk2(sysclk: u32, cfgr: &CfgrR) -> u32 {
-        let hclk1 = Self::hclk1(sysclk, cfgr);
-
-        if cfgr.ppre2f() {
-            let ppre2 = cfgr.ppre2().div_scale() as u32;
-
-            hclk1 / ppre2
-        } else {
-            hclk1
+        match clk {
+            PllSrc::NoClock => false,
+            PllSrc::Msi => cr.msirdy().bit(),
+            PllSrc::Hsi16 => cr.hsirdy().bit() || cr.hsikerdy().bit(),
+            PllSrc::Hse => cr.hserdy().bit(),
         }
     }
 
-    fn msi_hertz(cr_r: &CrR) -> u32 {
-        cr_r.msirange().hertz()
+    fn calculate_pclk1(&self, hclk1: Hertz, ppre1: PpreScaler) -> Hertz {
+        hclk1 / ppre1.div_scale() as u32
+    }
+
+    fn calculate_pclk2(&self, hclk1: Hertz, ppre2: PpreScaler) -> Hertz {
+        hclk1 / ppre2.div_scale() as u32
     }
 }
 
-pub(crate) fn set_flash_latency(rcc: &rcc::RegisterBlock, clk: u32) {
+pub(crate) fn set_flash_latency(hclk4: Hertz) {
     // SAFETY: No safety critical accesses performed
     let pwr = unsafe { &*PWR::PTR };
     // SAFETY: No safety critical accesses performed
     let flash = unsafe { &*FLASH::PTR };
 
-    let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+    cortex_m::interrupt::free(|_| {
+        let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
+        let latency = Latency::from(vos, hclk4);
 
-    let hclk4 = Rcc::hclk4(clk, &ExtCfgrR::read_from(rcc));
-    let latency = Latency::from(vos, hclk4);
-
-    flash.acr.modify(|_, w| w.latency().variant(latency.into()));
+        flash.acr.modify(|_, w| w.latency().variant(latency.into()));
+    });
 }
 
 pub trait Clocks<'a> {
     fn sysclk(&self) -> Hertz;
     fn hclk1(&self) -> Hertz;
+    fn hclk2(&self) -> Hertz;
+    fn hclk4(&self) -> Hertz;
     fn pclk1(&self) -> Hertz;
+    fn pclk2(&self) -> Hertz;
     fn i2c1_clk(&self) -> Hertz;
     fn i2c3_clk(&self) -> Hertz;
 }
 
-impl<'a, T: Clocks<'a>> Clocks<'a> for &'_ T {
+impl Clocks<'static> for Rcc {
     fn sysclk(&self) -> Hertz {
-        (*self).sysclk()
+        (&self).sysclk()
     }
 
     fn hclk1(&self) -> Hertz {
-        (*self).hclk1()
+        (&self).hclk1()
+    }
+
+    fn hclk2(&self) -> Hertz {
+        (&self).hclk2()
+    }
+
+    fn hclk4(&self) -> Hertz {
+        (&self).hclk4()
     }
 
     fn pclk1(&self) -> Hertz {
-        (*self).pclk1()
+        (&self).pclk1()
+    }
+
+    fn pclk2(&self) -> Hertz {
+        (&self).pclk2()
     }
 
     fn i2c1_clk(&self) -> Hertz {
-        (*self).i2c1_clk()
+        (&self).i2c1_clk()
     }
 
     fn i2c3_clk(&self) -> Hertz {
-        (*self).i2c3_clk()
+        (&self).i2c3_clk()
     }
 }
 
 impl<'a> Clocks<'a> for &'a Rcc {
     fn sysclk(&self) -> Hertz {
-        self.current_sysclk_hertz().Hz()
+        let cfgr = self.rcc.cfgr.read();
+        assert_eq!(cfgr.sw().bits(), cfgr.sws().bits());
+
+        let sysclk: SysclkSwitch = cfgr.sw().bits().try_into().unwrap();
+        let sysclkx = match sysclk {
+            SysclkSwitch::Msi => {
+                SysclkX::Msi(self.rcc.cr.read().msirange().bits().try_into().unwrap())
+            }
+            SysclkSwitch::Hsi16 => SysclkX::Hsi16,
+            SysclkSwitch::Hse => SysclkX::Hse(self.rcc.cr.read().hsepre().bit()),
+            SysclkSwitch::Pll => SysclkX::Pll,
+        };
+
+        self.calculate_sysclk(sysclkx).unwrap()
     }
 
     fn hclk1(&self) -> Hertz {
-        self.current_hclk1().Hz()
+        let hpre = self.rcc.cfgr.read().hpre().bits().try_into().unwrap();
+        self.calculate_hclk1(self.sysclk(), hpre)
+    }
+
+    fn hclk2(&self) -> Hertz {
+        let c2hpre = self.rcc.extcfgr.read().c2hpre().bits().try_into().unwrap();
+        self.calculate_hclk2(self.sysclk(), c2hpre)
+    }
+
+    fn hclk4(&self) -> Hertz {
+        let shdpre = self.rcc.extcfgr.read().shdhpre().bits().try_into().unwrap();
+        self.calculate_hclk4(self.sysclk(), shdpre)
     }
 
     fn pclk1(&self) -> Hertz {
-        self.current_pclk1().Hz()
+        let ppre1 = self.rcc.cfgr.read().ppre1().bits().try_into().unwrap();
+        self.calculate_pclk1(self.hclk1(), ppre1)
+    }
+
+    fn pclk2(&self) -> Hertz {
+        let ppre2 = self.rcc.cfgr.read().ppre2().bits().try_into().unwrap();
+        self.calculate_pclk2(self.hclk1(), ppre2)
     }
 
     fn i2c1_clk(&self) -> Hertz {
-        match self.ccip_read().i2c1sel() {
+        let i2c_clk: I2cSel = self.rcc.ccipr.read().i2c1sel().bits().try_into().unwrap();
+
+        match i2c_clk {
             I2cSel::Pclk => self.pclk1(),
             I2cSel::Sysclk => self.sysclk(),
-            I2cSel::Hsi16 => hsi16_hertz().Hz(),
+            I2cSel::Hsi16 => hsi16_hertz(),
         }
     }
 
     fn i2c3_clk(&self) -> Hertz {
-        match self.ccip_read().i2c3sel() {
+        let i2c_clk: I2cSel = self.rcc.ccipr.read().i2c3sel().bits().try_into().unwrap();
+
+        match i2c_clk {
             I2cSel::Pclk => self.pclk1(),
             I2cSel::Sysclk => self.sysclk(),
-            I2cSel::Hsi16 => hsi16_hertz().Hz(),
+            I2cSel::Hsi16 => hsi16_hertz(),
         }
     }
 }
@@ -809,7 +1093,10 @@ impl<'a> Clocks<'a> for &'a Rcc {
 pub struct Ccdr {
     sysclk: Hertz,
     hclk1: Hertz,
+    hclk2: Hertz,
+    hclk4: Hertz,
     pclk1: Hertz,
+    pclk2: Hertz,
     i2c1_clk: Hertz,
     i2c3_clk: Hertz,
 }
@@ -823,8 +1110,20 @@ impl Clocks<'static> for Ccdr {
         self.hclk1
     }
 
+    fn hclk2(&self) -> Hertz {
+        self.hclk2
+    }
+
+    fn hclk4(&self) -> Hertz {
+        self.hclk4
+    }
+
     fn pclk1(&self) -> Hertz {
         self.pclk1
+    }
+
+    fn pclk2(&self) -> Hertz {
+        self.pclk2
     }
 
     fn i2c1_clk(&self) -> Hertz {
@@ -836,278 +1135,50 @@ impl Clocks<'static> for Ccdr {
     }
 }
 
-config_reg_u32! {
-    R, CfgrR, RCC, cfgr, [
-        sw => (SysclkSwitch, u8, [1:0], "System clock switch"),
-        sws => (SysclkSwitch, u8, [3:2], "System clock switch status"),
-        hpre => (PreScaler, u8, [7:4], "HCLK1 prescaler (CPU1, AHB1, AHB2, AHB3, SRAM1)"),
-        ppre1 => (PpreScaler, u8, [10:8], "PCLK1 low-speed prescaler (APB1)"),
-        ppre2 => (PpreScaler, u8, [13:11], "PCLK2 high-speed prescaler (APB2)"),
-        stopwuck => (bool, bool, [15:15], "Wakeup from Stop and CSS backup clock selection\n\n\
-            - `false`: MSI\n\
-            - `true`: HSI16
-        "),
-        hpref => (bool, bool, [16:16], "HCLK1 prescaler flag applied (CPU1, AHB1, AHB2, AHB3, SRAM1)"),
-        ppre1f => (bool, bool, [17:17], "PCLK1 prescaler flag applied (APB1)"),
-        ppre2f => (bool, bool, [18:18], "PCLK2 prescaler flag applied (APB2)"),
-        mcosel => (McoSelector, u8, [27:24], "Microcontroller clock output"),
-        mcopre => (McoPrescaler, u8, [30:28], "Microcontroller clock output prescaler"),
-    ]
+impl Clocks<'static> for &'_ Ccdr {
+    fn sysclk(&self) -> Hertz {
+        (*self).sysclk()
+    }
+
+    fn hclk1(&self) -> Hertz {
+        (*self).hclk1()
+    }
+
+    fn hclk2(&self) -> Hertz {
+        (*self).hclk2()
+    }
+
+    fn hclk4(&self) -> Hertz {
+        (*self).hclk4()
+    }
+
+    fn pclk1(&self) -> Hertz {
+        (*self).pclk1()
+    }
+
+    fn pclk2(&self) -> Hertz {
+        (*self).pclk2()
+    }
+
+    fn i2c1_clk(&self) -> Hertz {
+        (*self).i2c1_clk()
+    }
+
+    fn i2c3_clk(&self) -> Hertz {
+        (*self).i2c3_clk()
+    }
 }
 
-config_reg_u32! {
-    W, CfgrW, RCC, cfgr, [
-        sw => (_sw, SysclkSwitch, u8, [1:0], "System clock switch"),
-        hpre => (_hpre, PreScaler, u8, [7:4], "HCLK1 prescaler (CPU1, AHB1, AHB2, AHB3, SRAM1)"),
-        ppre1 => (_ppre1, PpreScaler, u8, [10:8], "PCLK1 low-speed prescaler (APB1)"),
-        ppre2 => (_ppre2, PpreScaler, u8, [13:11], "PCLK2 high-speed prescaler (APB2)"),
-        stopwuck => (_stopwuck, bool, bool, [15:15], "Wakeup from Stop and CSS backup clock selection\n\n\
-            - `false`: MSI\n\
-            - `true`: HSI16
-        "),
-        mcosel => (_mcosel, McoSelector, u8, [27:24], "Microcontroller clock output"),
-        mcopre => (_mcopre, McoPrescaler, u8, [30:28], "Microcontroller clock output prescaler"),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopwuck {
+    Msi,
+    Hsi16,
 }
 
-config_reg_u32! {
-    R, CrR, RCC, cr, [
-        msion => (bool, bool, [0:0], "MSI clock enable"),
-        msirdy => (bool, bool, [1:1], "MSI clock ready flag"),
-        msipllen => (bool, bool, [2:2], "MSI clock PLL enable"),
-        msirange => (MsiRange, u8, [7:4], "MSI clock range"),
-        hsion => (bool, bool, [8:8], "HSI16 clock enable"),
-        hsikeron => (bool, bool, [9:9], "HSI16 always enable for peripheral kernel clocks"),
-        hsirdy => (bool, bool, [10:10], "HSI16 clock ready flag"),
-        hsiasfs => (bool, bool, [11:11], "HSI16 automatic start from Stop"),
-        hsikerdy => (bool, bool, [12:12], "HSI16 kernel clock ready flag for peripheral requests"),
-        hseon => (bool, bool, [16:16], "HSE clock enable"),
-        hserdy => (bool, bool, [17:17], "HSE clock ready flag"),
-        csson => (bool, bool, [19:19], "HSE clock security system enable"),
-        hsepre => (bool, bool, [20:20], "HSE system clock and PLL M divider prescale\n\n\
-            - `false`: SYSCLK and PLL M divider input clocks are not divided (HSE)\n\
-            - `true`: SYSCLK and PLL M divider input clocks are divided by 2 (HSE/2)
-        "),
-        pllon => (bool, bool, [24:24], "System PLL enable"),
-        pllrdy => (bool, bool, [25:25], "System PLL clock ready flag"),
-        pllsai1on => (bool, bool, [26:26], "SAI PLL enable"),
-        pllsai1rdy => (bool, bool, [27:27], "SAI PLL clock ready flag\n\n\
-            - `false`: PLLSAI1 unlocked\n\
-            - `true`: PLLSAI1 locked
-        "),
-    ]
-}
-
-config_reg_u32! {
-    W, CrW, RCC, cr, [
-        msion => (_msion, bool, bool, [0:0], "MSI clock enable"),
-        msipllen => (_msipllen, bool, bool, [2:2], "MSI clock PLL enable"),
-        msirange => (_msirange, MsiRange, u8, [7:4], "MSI clock range"),
-        hsion => (_hsion, bool, bool, [8:8], "HSI16 clock enable"),
-        hsikeron => (_hsikeron, bool, bool, [9:9], "HSI16 always enable for peripheral kernel clocks"),
-        hsiasfs => (_hsiasfs, bool, bool, [11:11], "HSI16 automatic start from Stop"),
-        hseon => (_hseon, bool, bool, [16:16], "HSE clock enable"),
-        csson => (_csson, bool, bool, [19:19], "HSE clock security system enable"),
-        hsepre => (_hsepre, bool, bool, [20:20], "HSE system clock and PLL M divider prescale\n\n\
-            - `false`: SYSCLK and PLL M divider input clocks are not divided (HSE)\n\
-            - `true`: SYSCLK and PLL M divider input clocks are divided by 2 (HSE/2)
-        "),
-        pllon => (_pllon, bool, bool, [24:24], "System PLL enable"),
-        pllsai1on => (_pllsai1on, bool, bool, [26:26], "SAI PLL enable"),
-    ]
-}
-
-config_reg_u32! {
-    RW, PllCfgrR, PllCfgrW, RCC, pllcfgr, [
-        pllsrc => (_pllsrc, PllSrc, u8, [1:0], "Main PLL and audio PLLSAI1 clock source"),
-        pllm => (_pllm, Pllm, u8, [6:4], "Division factor for the main PLL and audio PLLSAI1 input clock"),
-        plln => (_plln, Plln, u8, [14:8], "Main PLL multiplication factor for VCO"),
-        pllpen => (_pllpen, bool, bool, [16:16], "Main PLL PLLPCLK output clock enable"),
-        pllp => (_pllp, Pllp, u8, [21:17], "Main PLL division factor for PLLPCLK"),
-        pllqen => (_pllqen, bool, bool, [24:24], "Main PLL PLLQCLK output clock enable"),
-        pllq => (_pllq, PllQR, u8, [27:25], "Main PLL division factor for PLLQCLK"),
-        pllren => (_pllren, bool, bool, [28:28], "Main PLL PLLRCLK output clock enable"),
-        pllr => (_pllr, PllQR, u8, [31:29], "Main PLL division factor for PLLRCLK"),
-    ]
-}
-
-config_reg_u32! {
-    R, ExtCfgrR, RCC, extcfgr, [
-        shdhpre => (PreScaler, u8, [3:0], "HCLK4 shared prescaler (AHB4, Flash memory and SRAM2)\n\n\
-            Set and cleared by software to control the division factor of the Shared HCLK4 clock (AHB4,
-            Flash memory and SRAM2).
-            The SHDHPREF flag can be checked to know if the programmed SHDHPRE prescaler value
-            is applied
-        "),
-        c2hpre => (PreScaler, u8, [7:4], "HCLK2 prescaler (CPU2)\n\n\
-            Set and cleared by software to control the division factor of the HCLK2 clock (CPU2).
-            The C2HPREF flag can be checked to know if the programmed C2HPRE prescaler value is
-            applied
-        "),
-        shdhpref => (bool, bool, [16:16], "HCLK4 shared prescaler flag (AHB4, Flash memory and SRAM2)"),
-        c2hpref => (bool, bool, [17:17], "HCLK2 prescaler flag (CPU2)"),
-        rfcss => (bool, bool, [20:20], "Radio system HCLK5 and APB3 selected clock source indication\n\n\
-            Set and reset by hardware to indicate which clock source is selected for the Radio system
-            HCLK5 and APB3 clock\n\n\
-            - `false`: HSI16 used for Radio system HCLK5 and APB3 clock\n\
-            - `true`: HSE divided by 2 used for Radio system HCLK5 and APB3 clock
-        "),
-    ]
-}
-
-config_reg_u32! {
-    W, ExtCfgrW, RCC, extcfgr, [
-        shdhpre => (_shdhpre, PreScaler, u8, [3:0], "HCLK4 shared prescaler (AHB4, Flash memory and SRAM2)\n\n\
-            Set and cleared by software to control the division factor of the Shared HCLK4 clock (AHB4, \
-            Flash memory and SRAM2). \n\
-            The SHDHPREF flag can be checked to know if the programmed SHDHPRE prescaler value \
-            is applied
-        "),
-        c2hpre => (_c2hpre, PreScaler, u8, [7:4], "HCLK2 prescaler (CPU2)\n\n\
-            Set and cleared by software to control the division factor of the HCLK2 clock (CPU2).\n\
-            The C2HPREF flag can be checked to know if the programmed C2HPRE prescaler value is \
-            applied
-        "),
-    ]
-}
-
-config_reg_u32! {
-    RW, Pllsai1CfgrR, Pllsai1CfgrW, RCC, pllsai1cfgr, [
-        plln => (_plln, Pllsai1N, u8, [14:8], "Audio PLLSAI1 multiplication factor for VCO\n\n\
-            These bits can be written only when the PLLSAI1 is disabled\n\n\
-            Note: The VCO output frequency must be between 64 and 344 MHz
-        "),
-        pllpen => (_pllpen, bool, bool, [16:16], "Audio PLLSAI1 PLLSAI1PCLK output enable"),
-        pllp => (_pllp, Pllp, u8, [21:17], "Audio PLLSAI1 division factor for PLLSAI1PCLK\n\n\
-            This output can be selected for SAI1 and ADC. These bits can be written only if PLLSAI1 is disabled
-        "),
-        pllqen => (_pllqen, bool, bool, [24:24], "Audio PLLSAI1 PLLSAI1QCLK output enable"),
-        pllq => (_pllq, PllQR, u8, [27:25], "Audio PLLSAI1 division factor for PLLSAI1QCLK\n\n\
-            This output can be selected for USB and True RNG clock. These bits can be written only if PLLSAI1 is disabled
-        "),
-        pllren => (_pllren, bool, bool, [28:28], "Audio PLLSAI1 PLLSAI1RCLK output enable"),
-        pllr => (_pllr, PllQR, u8, [31:29], "Audio PLLSAI1 division factor for PLLSAI1RCLK\n\n\
-            This output can be selected as system clock. These bits can be written only if PLLSAI1 is disabled
-        "),
-    ]
-}
-
-config_reg_u32! {
-    R, SmpsCrR, RCC, smpscr, [
-        smpssel => (Smpssel, u8, [1:0], "SMPS step-down converter clock selection"),
-        smpsdiv => (Smpsdiv, u8, [5:4], "SMPS step-down converter clock prescaler"),
-        smpssws => (Smpssel, u8, [9:8], "SMPS step-down converter clock switch status"),
-    ]
-}
-
-config_reg_u32! {
-    W, SmpsCrW, RCC, smpscr, [
-        smpssel => (_smpssel, Smpssel, u8, [1:0], "SMPS step-down converter clock selection"),
-        smpsdiv => (_smpsdiv, Smpsdiv, u8, [5:4], "SMPS step-down converter clock prescaler"),
-    ]
-}
-
-config_reg_u32! {
-    RW, CierR, CierW, RCC, cier, [
-        lsi1rdyie => (_lsi1rdyie, bool, bool, [0:0], "LSI1 ready interrupt enable"),
-        lserdyie => (_lserdyie, bool, bool, [1:1], "LSE ready interrupt enable"),
-        msirdyie => (_msirdyie, bool, bool, [2:2], "MSI ready interrupt enable"),
-        hsirdyie => (_hsirdyie, bool, bool, [3:3], "HSI16 ready interrupt enable"),
-        hserdyie => (_hserdyie, bool, bool, [4:4], "HSE ready interrupt enable"),
-        pllrdyie => (_pllrdyie, bool, bool, [5:5], "PLL ready interrupt enable"),
-        pllsai1rdyie => (_pllsai1rdyie, bool, bool, [6:6], "PLLSAI1 ready interrupt enable"),
-        lsecssie => (_lsecssie, bool, bool, [9:9], "LSE clock security system interrupt enable"),
-        hsi48rdyie => (_hsi48rdyie, bool, bool, [10:10], "HSI48 ready interrupt enable"),
-        lsi2rdyie => (_lsi2rdyie, bool, bool, [11:11], "LSI2 ready interrupt enable"),
-    ]
-}
-
-clear_status_reg_u32! {
-    Cicr, [
-        lsi1rdyc => (0, "LSI1 ready interrupt clear"),
-        lserdyc => (1, "LSE ready interrupt clear"),
-        msirdyc => (2, "MSI ready interrupt clear"),
-        hsirdyc => (3, "HSI16 ready interrupt clear"),
-        hserdyc => (4, "HSE ready interrupt clear"),
-        pllrdyc => (5, "PLL ready interrupt clear"),
-        pllsai1rdyc => (6, "PLLSAI1 ready interrupt clear"),
-        lsecssc => (9, "LSE clock security system interrupt clear"),
-        hsi48rdyc => (10, "HSI48 ready interrupt clear"),
-        lsi2rdyc => (11, "LSI2 ready interrupt clear"),
-    ]
-}
-
-config_reg_u32! {
-    R, CsrR, RCC, csr, [
-        lsi1on => (bool, bool, [0:0], "LSI1 oscillator enable"),
-        lsi1rdy => (bool, bool, [1:1], "LSI1 oscillator ready"),
-        lsi2on => (bool, bool, [2:2], "LSI2 oscillator enable and selection\n\n\
-            - `false`: LSI2 oscillator off (LSI1 selected on LSI)\n\
-            - `true`: LSI2 oscillator on (LSI2 when ready selected on LSI)
-        "),
-        lsi2rdy => (bool, bool, [3:3], "LSI2 oscillator ready"),
-        lsi2trim => (u8, u8, [11:8], "LSI2 oscillator trim\n\n\
-            Note: LSI2TRIM must be changed only when LSI2 is disabled
-        "),
-        rfwkpsel => (Rfwkpsel, u8, [15:14], "RF system wakeup clock source selection"),
-        rfrsts => (bool, bool, [16:16], "Radio system BLE and 802.15.4 reset status\n\n\
-            - `false`: Radio system BLE and 802.15.4 not in reset, radio system can be accessed\n\
-            - `true`: Radio system BLE and 802.15.4 under reset, radio system cannot be accessed
-        "),
-        oblrstf => (bool, bool, [25:25], "Option byte loader reset flag\n\n\
-            Cleared by writing to the RMVF bit
-        "),
-        pinrstf => (bool, bool, [26:26], "Pin reset flag\n\n\
-            Cleared by writing to the RMVF bit
-        "),
-        borrstf => (bool, bool, [27:27], "BOR flag\n\n\
-            Cleared by writing to the RMVF bit
-        "),
-        sftrstf => (bool, bool, [28:28], "Software reset flag\n\n\
-            Cleared by writing to the RMVF bit
-        "),
-        iwdgrstf => (bool, bool, [29:29], "Independent window watchdog reset flag\n\n\
-            Cleared by writing to the RMVF bit
-        "),
-        wwdgrstf => (bool, bool, [30:30], "Window watchdog reset flag\n\n\
-            Cleared by writing to the RMVF bit
-        "),
-        lpwrrstf => (bool, bool, [31:31], "Low power reset flag\n\n\
-            Cleared by writing to the RMVF bit\n\n\
-            - `false`: No illegal mode reset occured\n\
-            - `true` Illegal mode reset occured
-        "),
-    ]
-}
-
-config_reg_u32! {
-    W, CsrW, RCC, csr, [
-        lsi1on => (_lsi1on, bool, bool, [0:0], "LSI1 oscillator enable"),
-        lsi2on => (_lsi2on, bool, bool, [2:2], "LSI2 oscillator enable and selection\n\n\
-            - `false`: LSI2 oscillator off (LSI1 selected on LSI)\n\
-            - `true`: LSI2 oscillator on (LSI2 when ready selected on LSI)
-        "),
-        lsi2trim => (_lsi2trim, u8, u8, [11:8], "LSI2 oscillator trim\n\n\
-            Note: LSI2TRIM must be changed only when LSI2 is disabled
-        "),
-        rfwkpsel => (_rfwkpsel, Rfwkpsel, u8, [15:14], "RF system wakeup clock source selection"),
-        rmvw => (_rmvw, bool, bool, [23:23], "Remove reset flag"),
-    ]
-}
-
-config_reg_u32! {
-    RW, CcipR, CcipW, RCC, ccipr, [
-        usart1sel => (_usart1sel, Usart1sel, u8, [1:0], "USART1 clock source selection"),
-        lpuart1sel => (_lpuart1sel, Usart1sel, u8, [11:10], "LPUART1 clock source selection"),
-        i2c1sel => (_i2c1sel, I2cSel, u8, [13:12], "I2C1 clock source selection"),
-        i2c3sel => (_i2c3sel, I2cSel, u8, [17:16], "I2C3 clock source selection"),
-        lptim1sel => (_lptim1sel, LptimSel, u8, [19:18], "Low power timer 1 clock source selection"),
-        lptim2sel => (_lptim2sel, LptimSel, u8, [21:20], "Low power timer 2 clock source selection"),
-        sai1sel => (_sai1sel, Sai1Sel, u8, [23:22], "SAI1 clock source selection"),
-        clk48sel => (_clk48sel, Clk48Sel, u8, [27:26], "48 MHz clock source selection"),
-        adcsel => (_adcsel, AdcSel, u8, [29:28], "ADC clock source selection"),
-        rngsel => (_rngsel, RngSel, u8, [31:30], "RNG clock source selection"),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RfClock {
+    Hsi16,
+    Hse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, TryFromPrimitive, IntoPrimitive)]
@@ -1140,20 +1211,20 @@ pub enum MsiRange {
 }
 
 impl MsiRange {
-    pub const fn hertz(self) -> u32 {
+    pub const fn hertz(self) -> Hertz {
         match self {
-            Self::R100K => 100_000,
-            Self::R200K => 200_000,
-            Self::R400K => 400_000,
-            Self::R800K => 800_000,
-            Self::R1M => 1_000_000,
-            Self::R2M => 2_000_000,
-            Self::R4M => 4_000_000,
-            Self::R8M => 8_000_000,
-            Self::R16M => 16_000_000,
-            Self::R24M => 24_000_000,
-            Self::R32M => 32_000_000,
-            Self::R48M => 48_000_000,
+            Self::R100K => Hertz::Hz(100_000),
+            Self::R200K => Hertz::Hz(200_000),
+            Self::R400K => Hertz::Hz(400_000),
+            Self::R800K => Hertz::Hz(800_000),
+            Self::R1M => Hertz::Hz(1_000_000),
+            Self::R2M => Hertz::Hz(2_000_000),
+            Self::R4M => Hertz::Hz(4_000_000),
+            Self::R8M => Hertz::Hz(8_000_000),
+            Self::R16M => Hertz::Hz(16_000_000),
+            Self::R24M => Hertz::Hz(24_000_000),
+            Self::R32M => Hertz::Hz(32_000_000),
+            Self::R48M => Hertz::Hz(48_000_000),
         }
     }
 }
@@ -1607,34 +1678,34 @@ pub enum RngSel {
 }
 
 /// MSI Maximum frequency
-pub const fn msi_max_hertz(vos: Vos) -> u32 {
+pub const fn msi_max_hertz(vos: Vos) -> Hertz {
     match vos {
-        Vos::Range1 => 48_000_000,
-        Vos::Range2 => 16_000_000,
+        Vos::Range1 => Hertz::MHz(48),
+        Vos::Range2 => Hertz::MHz(16),
     }
 }
 
 /// HSI16 frequency
-pub const fn hsi16_hertz() -> u32 {
-    16_000_000
+pub const fn hsi16_hertz() -> Hertz {
+    Hertz::MHz(16)
 }
 
 /// HSI48 frequency
-pub const fn hsi48_hertz() -> u32 {
-    48_000_000
+pub const fn hsi48_hertz() -> Hertz {
+    Hertz::MHz(48)
 }
 
 /// HSE frequency
 ///
 /// Note: If Range 2 is selected, HSEPRE must be set to divide the frequency by 2
-pub const fn hse_hertz() -> u32 {
-    32_000_000
+pub const fn hse_hertz() -> Hertz {
+    Hertz::MHz(32)
 }
 
-pub const fn hse_output_hertz(hsepre: bool) -> u32 {
+pub const fn hse_output_hertz(hsepre: bool) -> Hertz {
     match hsepre {
         false => hse_hertz(),
-        true => hse_hertz() / 2,
+        true => Hertz::from_raw(hse_hertz().raw() / 2),
     }
 }
 
@@ -1642,28 +1713,28 @@ pub const fn hse_output_hertz(hsepre: bool) -> u32 {
 ///
 /// - Range 1: VCO max = 344 MHz
 /// - Range 2: VCO max = 128 MHz
-pub const fn pll_max_hertz(vos: Vos) -> u32 {
+pub const fn pll_max_hertz(vos: Vos) -> Hertz {
     match vos {
-        Vos::Range1 => 64_000_000,
-        Vos::Range2 => 16_000_000,
+        Vos::Range1 => Hertz::MHz(64),
+        Vos::Range2 => Hertz::MHz(16),
     }
 }
 
 /// 32 kHz low speed internal RC which may drive the independent watchdog
 /// and optionally the RTC used for Auto-wakeup from Stop and Standby modes
-pub const fn lsi1_hertz() -> u32 {
-    32_000_000
+pub const fn lsi1_hertz() -> Hertz {
+    Hertz::MHz(32)
 }
 
 /// 32 kHz low speed low drift internal RC which may drive the independent watchdog
 /// and optionally the RTC used for Auto-wakeup from Stop and Standby modes
-pub const fn lsi2_hertz() -> u32 {
-    32_000_000
+pub const fn lsi2_hertz() -> Hertz {
+    Hertz::MHz(32)
 }
 
 /// Low speed external crystal which optionally drives the RTC used for
 /// Auto-wakeup or the RF system Auto-wakeup from Stop and Standby modes, or the
 /// real-time clock (RTCCLK)
-pub const fn lse_hertz() -> u32 {
-    32_768_000
+pub const fn lse_hertz() -> Hertz {
+    Hertz::kHz(32_768)
 }

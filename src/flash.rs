@@ -1,5 +1,7 @@
 use crate::signature::FlashSize;
+use crate::time::Hertz;
 use crate::{pac::FLASH, pwr::Vos};
+use fugit::RateExtU32;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
 /// Total number of pages, indexed 0 to 255
@@ -988,23 +990,23 @@ pub enum Latency {
 }
 
 impl Latency {
-    pub fn from(vos: Vos, sysclk: u32) -> Self {
+    pub(crate) fn from(vos: Vos, hclk4: Hertz) -> Self {
         match vos {
             Vos::Range1 => {
-                if sysclk <= 18_000_000 {
+                if hclk4 <= 18.MHz::<1, 1>() {
                     Self::W0
-                } else if sysclk <= 36_000_000 {
+                } else if hclk4 <= 36.MHz::<1, 1>() {
                     Self::W1
-                } else if sysclk <= 54_000_000 {
+                } else if hclk4 <= 54.MHz::<1, 1>() {
                     Self::W2
                 } else {
                     Self::W3
                 }
             }
             Vos::Range2 => {
-                if sysclk <= 6_000_000 {
+                if hclk4 <= 6.MHz::<1, 1>() {
                     Self::W0
-                } else if sysclk <= 12_000_000 {
+                } else if hclk4 <= 12.MHz::<1, 1>() {
                     Self::W1
                 } else {
                     Self::W2

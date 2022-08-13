@@ -143,28 +143,3 @@ impl R<u32> {
         val
     }
 }
-
-macro_rules! clear_status_reg_u32 {
-    ($ident:ident, [
-        $($field:ident => ($bit:tt, $doc:tt)),* $(,)?
-    ]) => {
-        pub struct $ident(u32);
-
-        impl $ident {
-            pub fn new() -> Self {
-                Self(0)
-            }
-
-            $(
-                #[doc=$doc]
-                pub fn $field(&mut self) -> &mut Self {
-                    mask_u32!(MASK, OFFSET, [$bit:$bit]);
-
-                    set_u32!(self.0, 1, MASK, OFFSET);
-
-                    self
-                }
-            )*
-        }
-    };
-}
