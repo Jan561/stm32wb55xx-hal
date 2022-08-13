@@ -166,6 +166,8 @@ impl Rcc {
             .modify(|_, w| w.msirange().variant(range.into()));
 
         if is_sysclk && old_range > range {
+            while self.rcc.cr.read().msirdy().bit_is_clear() {}
+
             flash_setup();
         }
 
@@ -343,6 +345,8 @@ impl Rcc {
         self.rcc.cfgr.modify(|_, w| w.sw().variant(sw.into()));
 
         if new_sysclk < current_sysclk {
+            while self.rcc.cfgr.read().sws().bits() != sw.into() {}
+
             flash_setup();
         }
 
@@ -442,9 +446,27 @@ impl Rcc {
             vos,
         )?;
 
+        let flash_setup = || {
+            let hclk4 = self.calculate_hclk4(sysclk, scale);
+
+            set_flash_latency(hclk4);
+        };
+
+        let current_scale = self.rcc.extcfgr.read().shdhpre().bits().try_into().unwrap();
+
+        if scale < current_scale {
+            flash_setup();
+        }
+
         self.rcc
             .extcfgr
             .modify(|_, w| w.c2hpre().variant(scale.into()));
+
+        if scale > current_scale {
+            while self.rcc.extcfgr.read().shdhpref().bit_is_clear() {}
+
+            flash_setup();
+        }
 
         Ok(())
     }
