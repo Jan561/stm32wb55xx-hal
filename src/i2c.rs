@@ -80,7 +80,7 @@ pub trait I2cExt: Sized {
     fn i2c<'a, PINS>(
         self,
         pins: PINS,
-        clocks: impl Clocks<'a> + TrustedClocks<'a>,
+        clocks: impl Clocks + TrustedClocks<'a>,
         frequency: Hertz,
     ) -> I2c<'a, Self, PINS>
     where
@@ -247,7 +247,7 @@ macro_rules! i2c {
         paste! {
             $(
                 impl<'a, PINS> I2c<'a, $I2Cx, PINS> {
-                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks<'a> + TrustedClocks<'a>, frequency: Hertz) -> Self
+                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz) -> Self
                     where
                         PINS: Pins<$I2Cx>,
                     {
@@ -723,7 +723,7 @@ macro_rules! i2c {
                 hal! { TenBitAddress, TenBit }
 
                 impl I2cExt for $I2Cx {
-                    fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks<'a> + TrustedClocks<'a>, frequency: Hertz) -> I2c<'a, $I2Cx, PINS>
+                    fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz) -> I2c<'a, $I2Cx, PINS>
                     where
                         PINS: Pins<$I2Cx>,
                     {

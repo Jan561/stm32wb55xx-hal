@@ -151,6 +151,7 @@ macro_rules! rec {
     ($($(#[$meta:meta])? $p:ident => $AXBn:ident),* $(,)?) => {
         paste! {
             $(
+                #[allow(clippy::upper_case_acronyms)]
                 $(#[$meta])?
                 pub struct $p;
 
@@ -211,52 +212,63 @@ rec! {
     // BLE => APB3,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct DMAMUX1;
 enable!(DMAMUX1 => (AHB1, dmamuxen));
 sm_enable!(DMAMUX1 => (AHB1, dmamuxsmen));
 reset!(DMAMUX1 => (AHB1, dmamuxrst));
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct SRAM1;
 sm_enable!(SRAM1 => (AHB1, sram1smen));
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct ADC;
 enable!(ADC => (AHB2, adcen));
 sm_enable!(ADC => (AHB2, adcfssmen));
 reset!(ADC => (AHB2, adcrst));
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct SRAM2;
 sm_enable!(SRAM2 => (AHB3, sram2smen));
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct HSEM;
 enable!(HSEM => (AHB3, hsemen));
 reset!(HSEM => (AHB3, hsemrst));
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct IPCC;
 enable!(IPCC => (AHB3, ipccen));
 reset!(IPCC => (AHB3, ipccrst));
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct RTCAPB;
 enable!(RTCAPB => (APB1_1, rtcapben));
 sm_enable!(RTCAPB => (APB1_1, rtcapbsmen));
 
 #[cfg(feature = "cm4")]
+#[allow(clippy::upper_case_acronyms)]
 pub struct WWDG;
 #[cfg(feature = "cm4")]
 enable!(WWDG => (APB1_1, wwdgen));
 #[cfg(feature = "cm4")]
 sm_enable!(WWDG => (APB1_1, wwdgsmen));
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct CRS;
 enable!(CRS => (APB1_1, crsen));
 sm_enable!(CRS => (APB1_1, crsmen));
 reset!(CRS => (APB1_1, crsrst));
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct USB;
 enable!(USB => (APB1_1, usben));
 sm_enable!(USB => (APB1_1, usbsmen));
 reset!(USB => (APB1_1, usbfsrst));
 
 #[cfg(feature = "cm0p")]
+#[allow(clippy::upper_case_acronyms)]
 pub struct BLE;
 #[cfg(feature = "cm0p")]
 enable!(BLE => (APB3, bleen));
@@ -270,6 +282,7 @@ enable!(_802 => (APB3, en802));
 #[cfg(feature = "cm0p")]
 sm_enable!(_802 => (APB3, smen802));
 
+#[allow(clippy::upper_case_acronyms)]
 pub struct RF;
 #[cfg(feature = "cm4")]
 reset!(RF => (APB3, rfrst));

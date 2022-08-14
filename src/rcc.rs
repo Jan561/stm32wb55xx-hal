@@ -1052,7 +1052,7 @@ pub(crate) fn set_flash_latency(hclk4: Hertz) {
     });
 }
 
-pub trait TryClocks<'a> {
+pub trait TryClocks {
     fn try_sysclk(&self) -> nb::Result<Hertz, Infallible>;
     fn try_hclk1(&self) -> nb::Result<Hertz, Infallible>;
     fn try_hclk2(&self) -> nb::Result<Hertz, Infallible>;
@@ -1063,7 +1063,7 @@ pub trait TryClocks<'a> {
     fn try_i2c3_clk(&self) -> nb::Result<Hertz, Infallible>;
 }
 
-impl TryClocks<'static> for Rcc {
+impl TryClocks for Rcc {
     fn try_sysclk(&self) -> nb::Result<Hertz, Infallible> {
         let cfgr = self.rcc.cfgr.read();
         if cfgr.sw().bits() != cfgr.sws().bits() {
@@ -1149,7 +1149,7 @@ impl TryClocks<'static> for Rcc {
     }
 }
 
-impl<'a> TryClocks<'a> for &'a Rcc {
+impl TryClocks for &'_ Rcc {
     fn try_sysclk(&self) -> nb::Result<Hertz, Infallible> {
         (*self).try_sysclk()
     }
@@ -1183,7 +1183,7 @@ impl<'a> TryClocks<'a> for &'a Rcc {
     }
 }
 
-pub trait Clocks<'a> {
+pub trait Clocks {
     fn sysclk(&self) -> Hertz;
     fn hclk1(&self) -> Hertz;
     fn hclk2(&self) -> Hertz;
@@ -1194,9 +1194,9 @@ pub trait Clocks<'a> {
     fn i2c3_clk(&self) -> Hertz;
 }
 
-impl<'a, T> TryClocks<'a> for T
+impl<T> TryClocks for T
 where
-    T: Clocks<'a>,
+    T: Clocks,
 {
     fn try_sysclk(&self) -> nb::Result<Hertz, Infallible> {
         Ok(self.sysclk())
@@ -1242,7 +1242,7 @@ pub struct Ccdr {
     i2c3_clk: Hertz,
 }
 
-impl Clocks<'static> for Ccdr {
+impl Clocks for Ccdr {
     fn sysclk(&self) -> Hertz {
         self.sysclk
     }
@@ -1276,7 +1276,7 @@ impl Clocks<'static> for Ccdr {
     }
 }
 
-impl Clocks<'static> for &'_ Ccdr {
+impl Clocks for &'_ Ccdr {
     fn sysclk(&self) -> Hertz {
         (*self).sysclk()
     }
@@ -1312,9 +1312,9 @@ impl Clocks<'static> for &'_ Ccdr {
 
 pub struct Unwrap<T>(pub T);
 
-impl<'a, T> Clocks<'a> for Unwrap<T>
+impl<T> Clocks for Unwrap<T>
 where
-    T: TryClocks<'a>,
+    T: TryClocks,
 {
     fn sysclk(&self) -> Hertz {
         self.try_hclk1().unwrap()
@@ -1351,9 +1351,9 @@ where
 
 pub struct Block<T>(pub T);
 
-impl<'a, T> Clocks<'a> for Block<T>
+impl<T> Clocks for Block<T>
 where
-    T: TryClocks<'a>,
+    T: TryClocks,
 {
     fn sysclk(&self) -> Hertz {
         nb::block!(self.try_sysclk()).unwrap()
@@ -1387,6 +1387,11 @@ where
     }
 }
 
+/// Clocks are guaranteed to be valid for the provided lifetime
+///
+/// # Safety
+///
+/// The trait must only be implemented when the contract is upheld
 pub unsafe trait TrustedClocks<'a> {}
 
 unsafe impl TrustedClocks<'static> for Ccdr {}
@@ -1661,7 +1666,7 @@ pub struct Plln(u8);
 
 impl Plln {
     pub fn new(x: u8) -> Result<Self, ValueError> {
-        if x < 6 || x > 127 {
+        if !(6..=127).contains(&x) {
             return value_error!("PLLN must be in range of [6, 127]");
         }
 
@@ -1699,7 +1704,7 @@ impl Pllp {
     ///
     /// - `x`: Desired division factor. Must be in range of [2, 32]
     pub fn new(x: u8) -> Result<Self, ValueError> {
-        if x < 2 || x > 32 {
+        if !(2..=32).contains(&x) {
             return value_error!("Main PLL division factor must be in range of [2, 32]");
         }
 
@@ -1768,7 +1773,7 @@ pub struct Pllsai1N(u8);
 
 impl Pllsai1N {
     pub fn new(x: u8) -> Result<Self, ValueError> {
-        if x < 4 || x > 86 {
+        if !(4..=86).contains(&x) {
             return value_error!("PLLSAI1 division factor must be in range of [4, 86]");
         }
 

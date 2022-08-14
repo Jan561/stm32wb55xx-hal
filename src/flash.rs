@@ -53,6 +53,10 @@ pub enum Error {
     Status(Status),
 }
 
+pub enum ConfigError {
+    CacheEnabled,
+}
+
 pub struct Status {
     #[cfg(feature = "cm4")]
     r: crate::pac::flash::sr::R,
@@ -99,6 +103,7 @@ pub struct Flash {
     flash: FLASH,
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl Flash {
     pub fn new(flash: FLASH) -> Self {
         Self { flash }
@@ -136,47 +141,58 @@ impl Flash {
         self.flash.cr.modify(|_, w| w.obl_launch().set_bit());
     }
 
-    pub fn acr<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&AcrR, &'w mut AcrW) -> &'w mut AcrW,
-    {
-        let r = AcrR::read_from(&self.flash);
-        let mut wc = AcrW(r.0);
+    pub fn prefetch_enable(&mut self, en: bool) {
+        let acr = &c1_c2!(self.flash.acr, self.flash.c2acr);
 
-        op(&r, &mut wc);
-
-        #[cfg(feature = "cm4")]
-        self.flash.acr.modify(|_, w| {
-            w.prften()
-                .bit(wc._prften())
-                .icen()
-                .bit(wc._icen())
-                .icrst()
-                .bit(wc._icrst())
-                .dcen()
-                .bit(wc._dcen())
-                .dcrst()
-                .bit(wc._dcrst())
-                .pes()
-                .bit(wc._pes())
-                .empty()
-                .bit(wc._empty())
-        });
-
-        #[cfg(feature = "cm0p")]
-        self.flash.c2acr.modify(|_, w| {
-            w.prften()
-                .bit(wc._prfen())
-                .icen()
-                .bit(wc._icen())
-                .icrst()
-                .bit(wc._icrst())
-                .pes()
-                .bit(wc._pes())
-        });
+        acr.modify(|_, w| w.prften().bit(en));
     }
 
-    #[cfg(feature = "cm0p")]
+    pub fn instruction_cache_enable(&mut self, en: bool) {
+        let acr = &c1_c2!(self.flash.acr, self.flash.c2acr);
+
+        acr.modify(|_, w| w.icen().bit(en));
+    }
+
+    pub fn instruction_cache_reset(&mut self) -> Result<(), ConfigError> {
+        let acr = &c1_c2!(self.flash.acr, self.flash.c2acr);
+
+        if acr.read().icen().bit_is_set() {
+            return Err(ConfigError::CacheEnabled);
+        }
+
+        acr.modify(|_, w| w.icrst().set_bit());
+        acr.modify(|_, w| w.icrst().clear_bit());
+
+        Ok(())
+    }
+
+    #[cfg(feature = "cm4")]
+    pub fn data_cache_enable(&mut self, en: bool) {
+        self.flash.acr.modify(|_, w| w.dcen().bit(en));
+    }
+
+    #[cfg(feature = "cm4")]
+    pub fn data_cache_reset(&mut self) -> Result<(), ConfigError> {
+        if self.flash.acr.read().dcen().bit_is_set() {
+            return Err(ConfigError::CacheEnabled);
+        }
+
+        self.flash.acr.modify(|_, w| w.dcrst().set_bit());
+        self.flash.acr.modify(|_, w| w.dcrst().clear_bit());
+
+        Ok(())
+    }
+
+    pub fn suspend_programming_erase(&mut self, suspend: bool) {
+        let acr = &c1_c2!(self.flash.acr, self.flash.c2acr);
+
+        acr.modify(|_, w| w.pes().bit(suspend));
+    }
+
+    pub fn empty(&self) -> bool {
+        self.flash.acr.read().empty().bit()
+    }
+
     pub fn latency(&self) -> Latency {
         self.flash.acr.read().latency().bits().try_into().unwrap()
     }
@@ -192,35 +208,6 @@ impl Drop for UnlockedFlash<'_> {
     }
 }
 
-/*macro_rules! clear_sr {
-    ($sr:ident, $misserr:ident) => {
-        fn clear_sr(&self) {
-            self.reg().$sr.modify(|_, w| {
-                w.eop()
-                    .set_bit()
-                    .fasterr()
-                    .set_bit()
-                    .$misserr()
-                    .set_bit()
-                    .operr()
-                    .set_bit()
-                    .pgaerr()
-                    .set_bit()
-                    .pgserr()
-                    .set_bit()
-                    .progerr()
-                    .set_bit()
-                    .rderr()
-                    .set_bit()
-                    .sizerr()
-                    .set_bit()
-                    .wrperr()
-                    .set_bit()
-            });
-        }
-    };
-}*/
-
 impl<'a> UnlockedFlash<'a> {
     fn reg(&self) -> &FLASH {
         &self.flash.flash
@@ -232,7 +219,7 @@ impl<'a> UnlockedFlash<'a> {
 
     /// Erase a single page
     ///
-    /// # SAFETY
+    /// # Safety
     ///
     /// Make sure you don't erase your code
     //
@@ -477,478 +464,256 @@ impl OptionsUnlocked<'_, '_> {
         self.flash.reg()
     }
 
-    pub fn user_options<F>(&self, op: F) -> Result<(), Error>
-    where
-        F: for<'w> FnOnce(&UserOptionsR, &'w mut UserOptionsW) -> &'w mut UserOptionsW,
-    {
-        let r = UserOptionsR::read_from(self.reg());
-        let mut wc = UserOptionsW(r.0);
-
-        op(&r, &mut wc);
-
-        self.reg().optr.modify(|_, w| {
-            w.rdp()
-                .variant(wc._rdp())
-                .ese()
-                .bit(wc._ese())
-                .bor_lev()
-                .variant(wc._bor_level())
-                .n_rst_stop()
-                .bit(wc._n_rst_stop())
-                .n_rst_stdby()
-                .bit(wc._n_rst_stdby())
-                .n_rst_shdw()
-                .bit(wc._n_rst_shdw())
-                .idwg_sw()
-                .bit(wc._idwg_sw())
-                .iwdg_stop()
-                .bit(wc._iwdg_stop())
-                .iwdg_stdby()
-                .bit(wc._iwdg_stdby())
-                .wwdg_sw()
-                .bit(wc._wwdg_sw())
-                .n_boot1()
-                .bit(wc._n_boot_1())
-                .sram2_pe()
-                .bit(wc._sram2_pe())
-                .sram2_rst()
-                .bit(wc._sram2_rst())
-                .n_swboot0()
-                .bit(wc._n_swboot_0())
-                .n_boot0()
-                .bit(wc._n_boot_0())
-                .agc_trim()
-                .variant(wc._agc_trim())
-        });
-
-        while self.reg().sr.read().bsy().bit_is_set() {}
-
-        if self.reg().sr.read().pesd().bit_is_set() || self.reg().c2sr.read().pesd().bit_is_set() {
-            return Err(Error::OperationSuspended);
-        }
-
-        self.reg().cr.modify(|_, w| w.optstrt().set_bit());
-
-        while self.reg().sr.read().bsy().bit_is_set() {}
-
-        Ok(())
+    pub fn read_protection(&mut self, rdp: RdpLevel) {
+        self.reg().optr.modify(|_, w| w.rdp().variant(rdp.into()));
     }
 
-    pub fn pcrop1a_strt<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Pcrop1aStrtR, &'w mut Pcrop1aStrtW) -> &'w mut Pcrop1aStrtW,
-    {
-        let r = Pcrop1aStrtR::read_from(self.reg());
-        let mut wc = Pcrop1aStrtW(r.0);
+    pub fn system_security_enabled(&mut self, en: bool) {
+        self.reg().optr.modify(|_, w| w.ese().bit(en));
+    }
 
-        op(&r, &mut wc);
+    pub fn bor_level(&mut self, level: BorResetLevel) {
+        self.reg()
+            .optr
+            .modify(|_, w| w.bor_lev().variant(level.into()));
+    }
 
+    pub fn reset_on_stop(&mut self, rst: bool) {
+        self.reg().optr.modify(|_, w| w.n_rst_stop().bit(!rst));
+    }
+
+    pub fn reset_on_standby(&mut self, rst: bool) {
+        self.reg().optr.modify(|_, w| w.n_rst_stdby().bit(!rst));
+    }
+
+    pub fn reset_on_shutdown(&mut self, rst: bool) {
+        self.reg().optr.modify(|_, w| w.n_rst_shdw().bit(!rst));
+    }
+
+    pub fn independent_watchdog(&mut self, wd: Watchdog) {
+        self.reg()
+            .optr
+            .modify(|_, w| w.idwg_sw().bit(wd == Watchdog::Software));
+    }
+
+    pub fn independent_watchdog_counter_stop(&mut self, cnt: WatchdogCounter) {
+        self.reg()
+            .optr
+            .modify(|_, w| w.iwdg_stop().bit(cnt == WatchdogCounter::Running));
+    }
+
+    pub fn independent_watchdog_counter_standby(&mut self, cnt: WatchdogCounter) {
+        self.reg()
+            .optr
+            .modify(|_, w| w.iwdg_stdby().bit(cnt == WatchdogCounter::Running));
+    }
+
+    pub fn window_watchdog(&mut self, wd: Watchdog) {
+        self.reg()
+            .optr
+            .modify(|_, w| w.wwdg_sw().bit(wd == Watchdog::Software));
+    }
+
+    pub fn boot_1(&mut self, boot: bool) {
+        self.reg().optr.modify(|_, w| w.n_boot1().bit(!boot));
+    }
+
+    pub fn sram2_parity_check_enable(&mut self, en: bool) {
+        self.reg().optr.modify(|_, w| w.sram2_pe().bit(!en));
+    }
+
+    pub fn sram2_erased_on_reset(&mut self, erased: bool) {
+        self.reg().optr.modify(|_, w| w.sram2_rst().bit(!erased));
+    }
+
+    pub fn boot0(&mut self, boot: Boot0) {
+        match boot {
+            Boot0::Software(boot0) => self
+                .reg()
+                .optr
+                .modify(|_, w| w.n_swboot0().clear_bit().n_boot0().bit(boot0)),
+            Boot0::Pin => self.reg().optr.modify(|_, w| w.n_swboot0().set_bit()),
+        }
+    }
+
+    pub fn agc_trim(&mut self, trim: u8) {
+        assert!(trim < 8);
+
+        self.reg().optr.modify(|_, w| w.agc_trim().variant(trim));
+    }
+
+    pub fn pcrop_erase_on_rdp_decrease(&mut self) {
+        self.reg().pcrop1aer.modify(|_, w| w.pcrop_rdp().set_bit());
+    }
+
+    pub fn pcrop1a(&mut self, start_hp: HalfPage, end_hp: HalfPage) {
         self.reg()
             .pcrop1asr
-            .modify(|_, w| w.pcrop1a_strt().variant(wc._pcrop1a_strt()));
+            .modify(|_, w| w.pcrop1a_strt().variant(start_hp.into()));
+        self.reg()
+            .pcrop1aer
+            .modify(|_, w| w.pcrop1a_end().variant(end_hp.into()));
     }
 
-    pub fn pcrop1a_end<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Pcrop1aEndR, &'w mut Pcrop1aEndW) -> &'w mut Pcrop1aEndW,
-    {
-        let r = Pcrop1aEndR::read_from(self.reg());
-        let mut wc = Pcrop1aEndW(r.0);
-
-        op(&r, &mut wc);
-
-        self.reg().pcrop1aer.modify(|_, w| {
-            w.pcrop1a_end()
-                .variant(wc._pcrop1a_end())
-                .pcrop_rdp()
-                .bit(wc._pcrop_rdp())
-        });
-    }
-
-    pub fn wrp1a<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Wrp1AR, &'w mut Wrp1AW) -> &'w mut Wrp1AW,
-    {
-        let r = Wrp1AR::read_from(self.reg());
-        let mut wc = Wrp1AW(r.0);
-
-        op(&r, &mut wc);
-
-        self.reg().wrp1ar.modify(|_, w| {
-            w.wrp1a_strt()
-                .variant(wc._wrp1a_strt())
-                .wrp1a_end()
-                .variant(wc._wrp1a_end())
-        });
-    }
-
-    pub fn wrp1b<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Wrp1BR, &'w mut Wrp1BW) -> &'w mut Wrp1BW,
-    {
-        let r = Wrp1BR::read_from(self.reg());
-        let mut wc = Wrp1BW(r.0);
-
-        op(&r, &mut wc);
-
-        self.reg().wrp1br.modify(|_, w| {
-            w.wrp1b_strt()
-                .variant(wc._wrp1b_strt())
-                .wrp1b_end()
-                .variant(wc._wrp1b_end())
-        })
-    }
-
-    pub fn pcrop1b_strt<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Pcrop1bStrtR, &'w mut Pcrop1bStrtW) -> &'w mut Pcrop1bStrtW,
-    {
-        let r = Pcrop1bStrtR::read_from(self.reg());
-        let mut wc = Pcrop1bStrtW(r.0);
-
-        op(&r, &mut wc);
-
+    pub fn pcrop1b(&mut self, start_hp: HalfPage, end_hp: HalfPage) {
         self.reg()
             .pcrop1bsr
-            .modify(|_, w| w.pcrop1b_strt().variant(wc._pcrop1b_strt()));
-    }
-
-    pub fn pcrop1b_end<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&Pcrop1bEndR, &'w mut Pcrop1bEndW) -> &'w mut Pcrop1bEndW,
-    {
-        let r = Pcrop1bEndR::read_from(self.reg());
-        let mut wc = Pcrop1bEndW(r.0);
-
-        op(&r, &mut wc);
-
+            .modify(|_, w| w.pcrop1b_strt().variant(start_hp.into()));
         self.reg()
             .pcrop1ber
-            .modify(|_, w| w.pcrop1b_end().variant(wc._pcrop1b_end()));
+            .modify(|_, w| w.pcrop1b_end().variant(end_hp.into()));
     }
 
-    /// Secure flash options (SFR)
-    ///
-    /// This register can only be written to by CPU2.
-    /// This register can be read by both CPUs.
-    pub fn secure_flash_options<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(
-            &SecureFlashOptionsR,
-            &'w mut SecureFlashOptionsW,
-        ) -> &'w mut SecureFlashOptionsW,
-    {
-        let r = SecureFlashOptionsR::read_from(self.reg());
-        let mut wc = SecureFlashOptionsW(r.0);
-
-        op(&r, &mut wc);
-
-        if r.0 != wc.0 {
-            self.reg().sfr.modify(|_, w| {
-                w.sfsa()
-                    .variant(wc._sfsa())
-                    .fsd()
-                    .bit(wc._fsd())
-                    .dds()
-                    .bit(wc._dds())
-            });
-        }
+    pub fn wrp1a(&mut self, start_p: Page, end_p: Page) {
+        self.reg().wrp1ar.modify(|_, w| {
+            w.wrp1a_strt()
+                .variant(start_p.into())
+                .wrp1a_end()
+                .variant(end_p.into())
+        });
     }
 
-    pub fn secure_sram2_options<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(
-            &SecureSRAM2OptionsR,
-            &'w mut SecureSRAM2OptionsW,
-        ) -> &'w mut SecureSRAM2OptionsW,
-    {
-        let r = SecureSRAM2OptionsR::read_from(self.reg());
-        let mut wc = SecureSRAM2OptionsW(r.0);
-
-        op(&r, &mut wc);
-
-        if r.0 != wc.0 {
-            self.reg().srrvr.modify(|_, w| {
-                w.sbrv()
-                    .variant(wc._sbrv())
-                    .sbrsa()
-                    .variant(wc._sbrsa())
-                    .brsd()
-                    .bit(wc._brsd())
-                    .snbrsa()
-                    .variant(wc._snbrsa())
-                    .nbrsd()
-                    .bit(wc._nbrsd())
-                    .c2opt()
-                    .bit(wc._c2opt())
-            });
-        }
+    pub fn wrp1b(&mut self, start_p: Page, end_p: Page) {
+        self.reg().wrp1br.modify(|_, w| {
+            w.wrp1b_strt()
+                .variant(start_p.into())
+                .wrp1b_end()
+                .variant(end_p.into())
+        });
     }
 
-    pub fn ipcc<F>(&self, op: F)
-    where
-        F: for<'w> FnOnce(&IpccR, &'w mut IpccW) -> &'w mut IpccW,
-    {
-        let r = IpccR::read_from(self.reg());
-        let mut wc = IpccW(r.0);
-
-        op(&r, &mut wc);
+    pub fn ipcc(&mut self, offset: usize) {
+        assert!(offset < (1 << 14));
 
         self.reg()
             .ipccbr
-            .modify(|_, w| w.ipccdba().variant(wc._ipccdba()));
+            .modify(|_, w| w.ipccdba().variant(offset as u16));
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn flash_security_enable(&mut self, en: bool) {
+        self.reg().sfr.modify(|_, w| w.fsd().bit(!en));
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn cpu2_debug_access_disabled(&mut self, disabled: bool) {
+        self.reg().sfr.modify(|_, w| w.dds().bit(disabled));
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn secure_flash_start(&mut self, page: Page) {
+        self.reg().sfr.modify(|_, w| w.sfsa().variant(page.into()));
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn cpu2_boot_reset_vector(&mut self, mem: Cpu2ResetMemory, offset: usize) {
+        assert!(offset < (1 << 18));
+
+        self.reg().srrvr.modify(|_, w| {
+            w.c2opt()
+                .bit(mem == Cpu2ResetMemory::Flash)
+                .sbrv()
+                .variant(offset as u32)
+        });
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn secure_sram2a_start(&mut self, sram_page: SramPage) {
+        self.reg()
+            .srrvr
+            .modify(|_, w| w.sbrsa().variant(sram_page.into()));
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn sram2a_security_disable(&mut self, disable: bool) {
+        self.reg().srrvr.modify(|_, w| w.brsd().bit(disable));
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn secure_sram2b_start(&mut self, sram_page: SramPage) {
+        self.reg()
+            .srrvr
+            .modify(|_, w| w.snbrsa().variant(sram_page.into()));
+    }
+
+    #[cfg(feature = "cm0p")]
+    pub fn sram2b_security_disable(&mut self, disable: bool) {
+        self.reg().srrvr.modify(|_, w| w.nbrsd().bit(disable));
     }
 }
 
-#[cfg(feature = "cm4")]
-config_reg_u32! {
-    R, AcrR, FLASH, acr, [
-        latency => (Latency, u8, [2:0], "Latency\n\n\
-            Represents the ratio of the flash memory HCLK clock period to the flash memory access time
-        "),
-        prften => (bool, bool, [8:8], "CPU1 Prefetch enable\n\n\
-            - `false`: CPU1 prefetch disabled\n\
-            - `true`: CPU1 prefetch enabled
-        "),
-        icen => (bool, bool, [9:9], "CPU1 Instruction cache enable\n\n\
-            - `false`: CPU1 instruction cache disabled\n\
-            - `true`: CPU1 instruction cache enabled
-        "),
-        dcen => (bool, bool, [10:10], "CPU1 data cache enable\n\n\
-            - `false`: CPU1 data cache is disabled\n\
-            - `true`: CPU1 data cache is enabled
-        "),
-        icrst => (bool, bool, [11:11], "CPU1 instruction cache reset\n\n\
-            This bit can be written only if the instruction cache is disabled\n\
-            - `false`: CPU1 instruction cache is not reset\n\
-            - `true`: CPU1 instruction cache is reset
-        "),
-        dcrst => (bool, bool, [12:12], "CPU1 data cache reset\n\n\
-            This bit can be written only if the data cache is disabled\n\
-            - `false`: CPU1 data cache is not reset\n\
-            - `true`: CPU1 data cache is reset
-        "),
-        pes => (bool, bool, [15:15], "CPU1 Program / erase suspend request\n\n\
-            - `false`: Flash memory program and erase operations granted\n\
-            - `true`: New flash memory program and erase operations suspended until this
-            bit and the same bit for CPU2 is cleared
-        "),
-        empty => (bool, bool, [16:16], "CPU1 Flash memory user area empty\n\n\
-            When read indicates whether the first location of the User Flash memory is erased or has a 
-programmed value\n\
-            - `false`: User flash memory programmed\n\
-            - `true`: User flash memory empty
-        "),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cpu2ResetMemory {
+    Sram,
+    Flash,
 }
 
-#[cfg(feature = "cm4")]
-config_reg_u32! {
-    W, AcrW, FLASH, acr, [
-        prften => (_prften, bool, bool, [8:8], "CPU1 Prefetch enable\n\n\
-            - `false`: CPU1 prefetch disabled\n\
-            - `true`: CPU1 prefetch enabled
-        "),
-        icen => (_icen, bool, bool, [9:9], "CPU1 Instruction cache enable\n\n\
-            - `false`: CPU1 instruction cache disabled\n\
-            - `true`: CPU1 instruction cache enabled
-        "),
-        dcen => (_dcen, bool, bool, [10:10], "CPU1 data cache enable\n\n\
-            - `false`: CPU1 data cache is disabled\n\
-            - `true`: CPU1 data cache is enabled
-        "),
-        icrst => (_icrst, bool, bool, [11:11], "CPU1 instruction cache reset\n\n\
-            This bit can be written only if the instruction cache is disabled\n\
-            - `false`: CPU1 instruction cache is not reset\n\
-            - `true`: CPU1 instruction cache is reset
-        "),
-        dcrst => (_dcrst, bool, bool, [12:12], "CPU1 data cache reset\n\n\
-            This bit can be written only if the data cache is disabled\n\
-            - `false`: CPU1 data cache is not reset\n\
-            - `true`: CPU1 data cache is reset
-        "),
-        pes => (_pes, bool, bool, [15:15], "CPU1 Program / erase suspend request\n\n\
-            - `false`: Flash memory program and erase operations granted\n\
-            - `true`: New flash memory program and erase operations suspended until this
-            bit and the same bit for CPU2 is cleared
-        "),
-        empty => (_empty, bool, bool, [16:16], "CPU1 Flash memory user area empty\n\n\
-            When read indicates whether the first location of the User Flash memory is erased or has a 
-programmed value\n\
-            - `false`: User flash memory programmed\n\
-            - `true`: User flash memory empty
-        "),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HalfPage(u16);
+
+impl HalfPage {
+    pub fn new(hp: u16) -> Self {
+        assert!(hp < NUM_PAGES as u16 * 2);
+
+        Self(hp)
+    }
 }
 
-#[cfg(feature = "cm0p")]
-config_reg_u32! {
-    RW, AcrR, AcrW, FLASH, c2acr, [
-        prfen => (_prfen, bool, bool, [8:8], "CPU2 prefetch enable\n\n\
-            - `false`: CPU2 prefetch disabled\n\
-            - `true`: CPU2 prefetch enabled
-        "),
-        icen => (_icen, bool, bool, [9:9], "CPU2 instruction cache enable\n\n\
-            - `false`: CPU2 instruction cache disabled\n\
-            - `true`: CPU2 instruction cache enabled
-        "),
-        icrst => (_icrst, bool, bool, [11:11], "CPU2 instruction cache reset\n\n\
-            - `false`: CPU2 instruction cache is not reset\n\
-            - `true`: CPU2 instruction cache is reset
-        "),
-        pes => (_pes, bool, bool, [15:15], "CPU2 program / erase suspend request\n\n\
-            - `false`: Flash memory program and erase operations granted\n\
-            - `true`: New flash memory program and erase operations suspended until this
-            bit and the same bit for CPU1 is cleared
-        "),
-    ]
+impl From<HalfPage> for u16 {
+    fn from(hp: HalfPage) -> u16 {
+        hp.0
+    }
 }
 
-config_reg_u32! {
-    RW, UserOptionsR, UserOptionsW, FLASH, optr, [
-        rdp => (_rdp, RdpLevel, u8, [7:0], "Read Protection Level"),
-        ese => (_ese, bool, bool, [8:8], "System Security enabled flag"),
-        bor_level => (_bor_level, BorResetLevel, u8, [11:9], "BOR Reset Level"),
-        n_rst_stop => (_n_rst_stop, bool, bool, [12:12], "No Reset in stop mode"),
-        n_rst_stdby => (_n_rst_stdby, bool, bool, [13:13], "No Reset in standby mode"),
-        n_rst_shdw => (_n_rst_shdw, bool, bool, [14:14], "No Reset in shutdown mode"),
-        idwg_sw => (_idwg_sw, bool, bool, [16:16], "Independent watchdog selection\n\n\
-            - `false`: Hardware independent watchdog\n\
-            - `true`: Software independent watchdog
-        "),
-        iwdg_stop => (_iwdg_stop, bool, bool, [17:17], "Independent watchdog counter freeze in stop mode\n\n\
-            - `false`: Independent watchdog counter is frozen in standby mode\n\
-            - `true`: Independent watchdog counter is running in standby mode
-        "),
-        iwdg_stdby => (_iwdg_stdby, bool, bool, [18:18], "Independent watchdog counter freeze in standby mode"),
-        wwdg_sw => (_wwdg_sw, bool, bool, [19:19], "Window watchdog selection\n\n\
-            - `false`: Hardware window watchdog\n\
-            - `true`: Software window watchdog
-        "),
-        n_boot_1 => (_n_boot_1, bool, bool, [23:23], "Boot configuration\n\n\
-            Together with BOOT0 pin or option bit nBOOT0 (depending on nSWBOOT0 option bit configuration), \
-            this bit selects boot mode from the user flash memory, SRAM1 or the System Memory
-        "),
-        sram2_pe => (_sram2_pe, bool, bool, [24:24], "SRAM2 parity check enable"),
-        sram2_rst => (_sram2_rst, bool, bool, [25:25], "SRAM2 and PKA RAM erase when system reset"),
-        n_swboot_0 => (_n_swboot_0, bool, bool, [26:26], "Software BOOT0 selection\n\n\
-            - `false`: BOOT0 taken from the option bit nBOOT0\n\
-            - `true`: BOOT0 taken from the PH3/BOOT0 pin
-        "),
-        n_boot_0 => (_n_boot_0, bool, bool, [27:27], "nBOOT0 option bit"),
-        agc_trim => (_agc_trim, u8, u8, [31:29], "Radio automatic gain control trimming"),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page(u8);
+
+impl Page {
+    pub fn new(p: u8) -> Self {
+        Self(p)
+    }
 }
 
-config_reg_u32! {
-    RW, Pcrop1aStrtR, Pcrop1aStrtW, FLASH, pcrop1asr, [
-        pcrop1a_strt => (_pcrop1a_strt, u16, u16, [8:0], "PCROP1A area start offset\n\n\
-            Unit: Half Page (2 KiB). Size: 9 Bit (0-511)
-        "),
-    ]
+impl From<Page> for u8 {
+    fn from(p: Page) -> u8 {
+        p.0
+    }
 }
 
-config_reg_u32! {
-    RW, Pcrop1aEndR, Pcrop1aEndW, FLASH, pcrop1aer, [
-        pcrop1a_end => (_pcrop1a_end, u16, u16, [8:0], "PCROP1A area end offset\n\n\
-            Unit: Half Page (2 KiB). Size: 9 Bit (0-511)
-        "),
-        pcrop_rdp => (_pcrop_rdp, bool, bool, [31:31], "PCROP area preserved when RDP level decreased\n\n\
-            This bit is set only\n\
-            - `false`: PCROP area is not erased when the RDP level is decreased from Level 1 to Level 0\n\
-            - `true`: PCROP area is erased when the RDP level is decreased from Level 1 to Level 0
-        "),
-    ]
+pub struct SramPage(u8);
+
+impl SramPage {
+    pub fn new(p: u8) -> Self {
+        assert!(p < 32);
+
+        Self(p)
+    }
 }
 
-config_reg_u32! {
-    RW, Wrp1AR, Wrp1AW, FLASH, wrp1ar, [
-        wrp1a_strt => (_wrp1a_strt, u8, u8, [7:0], "WRP first area 'A' start offset\n\n\
-            Unit: Page (4 KiB). Size: 8 Bit (0-255)
-        "),
-        wrp1a_end => (_wrp1a_end, u8, u8, [23:16], "WRP first area 'A' end offset\n\n\
-            Unit: Page (4 KiB). Size: 8 Bit (0-255)
-        "),
-    ]
+impl From<SramPage> for u8 {
+    fn from(p: SramPage) -> Self {
+        p.0
+    }
 }
 
-config_reg_u32! {
-    RW, Wrp1BR, Wrp1BW, FLASH, wrp1br, [
-        wrp1b_strt => (_wrp1b_strt, u8, u8, [7:0], "WRP second area 'B' start offset\n\n\
-            Unit: Page (4 KiB). Size: 8 Bit (0-255)
-        "),
-        wrp1b_end => (_wrp1b_end, u8, u8, [23:16], "WRP second area 'B' end offset\n\n\
-            Unit: Page (4 KiB). Size: 8 Bit (0-255)
-        "),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Boot0 {
+    /// BOOT0 taken from the option bit nBOOT0
+    Software(bool),
+    /// BOOT0 taken from PH3/BOOT0 pin
+    Pin,
 }
 
-config_reg_u32! {
-    RW, Pcrop1bStrtR, Pcrop1bStrtW, FLASH, pcrop1bsr, [
-        pcrop1b_strt => (_pcrop1b_strt, u16, u16, [8:0], "PCROP1B area start offset\n\n\
-            Unit: Half Page (2 KiB). Size: 9 Bit (0-511)
-        "),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Watchdog {
+    Hardware,
+    Software,
 }
 
-config_reg_u32! {
-    RW, Pcrop1bEndR, Pcrop1bEndW, FLASH, pcrop1ber, [
-        pcrop1b_end => (_pcrop1b_end, u16, u16, [8:0], "PCROP1B area end offset\n\n\
-            Unit: Half Page (2 KiB). Size: 9 Bit (0-511)
-        "),
-    ]
-}
-
-config_reg_u32! {
-    RW, SecureFlashOptionsR, SecureFlashOptionsW, FLASH, sfr, [
-        sfsa => (_sfsa, u8, u8, [7:0], "Secure flash memory start address\n\n\
-            Unit: Page (4 KiB). Size: 8 Bit (0-255)
-        "),
-        fsd => (_fsd, bool, bool, [8:8], "Flash memory security disabled\n\n\
-            Start address given by SFSA
-        "),
-        dds => (_dds, bool, bool, [12:12], "Disable CPU2 debug access"),
-    ]
-}
-
-config_reg_u32! {
-    RW, IpccR, IpccW, FLASH, ipccbr, [
-        ipccdba => (_ipccdba, u16, u16, [13:0], "IPCC mailbox data buffer base address offset\n\n\
-            Contains the first double word offset of the IPCC mailbox data buffer area in SRAM2\n\
-            - Unit: Double Word (8 Byte)\n\
-            - Size: 14 Bit
-        ")
-    ]
-}
-
-config_reg_u32! {
-    RW, SecureSRAM2OptionsR, SecureSRAM2OptionsW, FLASH, srrvr, [
-        sbrv => (_sbrv, u32, u32, [17:0], "CPU2 boot reset vector\n\n\
-            Contains the world aligned CPU2 boot reset start address offset within the selected \
-            memory area by C2OPT
-        "),
-        sbrsa => (_sbrsa, u8, u8, [22:18], "Secure backup SRAM2a start address\n\n\
-            SBRSA contains the start address of the first 1 KiB page of the secure backup SRAM2a area\n\
-            - Size: 5 Bits (0-31)
-        "),
-        brsd => (_brsd, bool, bool, [23:23], "Backup SRAM2a security disable\n\n\
-            - `false`: SRAM2a is secure. SBRSA contains the start address of the first 1 KiB page of the secure backup SRAM2a area\n\
-            - `true`: SRAM2a is not secure
-        "),
-        snbrsa => (_snbrsa, u8, u8, [29:25], "Secure non-backup SRAM2b start address\n\n\
-            SNBRSA contains the start address of the first 1 KiB page of the secure non-backup SRAM2b area
-        "),
-        nbrsd => (_nbrsd, bool, bool, [30:30], "Non-backup security disable\n\n\
-            - `false`: SRAM2b is secure. SNBRSA contains the start address of the first 1 KiB page \
-            of the secure non-backup SRAM2b area\n\
-            - `true`: SRAM2b is not secure
-        "),
-        c2opt => (_c2opt, bool, bool, [31:31], "CPU2 boot reset vector memory selection\n\n\
-            - `false`: SBRV offset addresses SRAM1 or SRAM2, from start address 0x2000_0000 \
-            (SBRV value must be kept within the SRAM area)\n\
-            - `true`: SBRV offset addresses Flash memory, from start address 0x0800_0000
-        "),
-    ]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchdogCounter {
+    Frozen,
+    Running,
 }
 
 /// Latency

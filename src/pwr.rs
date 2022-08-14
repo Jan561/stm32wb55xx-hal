@@ -46,7 +46,7 @@
 
 use crate::pac::pwr::{sr1, sr2};
 use crate::pac::PWR;
-use crate::rcc::{self, Clocks};
+use crate::rcc::{self, Clocks, TrustedClocks};
 use cortex_m::peripheral::SCB;
 use fugit::RateExtU32;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
@@ -77,7 +77,7 @@ impl Pwr {
     pub fn set_power_range<'a>(
         &mut self,
         range: Vos,
-        clocks: impl Clocks<'a>,
+        clocks: impl Clocks + TrustedClocks<'a>,
     ) -> nb::Result<(), Error> {
         if range == Vos::Range2 && clocks.sysclk() > 2.MHz::<1, 1>() {
             return Err(nb::Error::Other(Error::SysclkTooHighVos));
@@ -102,14 +102,17 @@ impl Pwr {
         let _ = self.enter_low_power_mode(Lpms::Shutdown, scb);
 
         // Technically unreachable
-        loop {}
+        unsafe { core::hint::unreachable_unchecked() }
     }
 
     /// Enter low power mode with enabled flash
     ///
     /// After calling the function, the clock speed must not be increased
     /// above 2 MHz.
-    pub fn enter_low_power_run<'a>(&mut self, clocks: impl Clocks<'a>) -> nb::Result<(), Error> {
+    pub fn enter_low_power_run<'a>(
+        &mut self,
+        clocks: impl Clocks + TrustedClocks<'a>,
+    ) -> nb::Result<(), Error> {
         if clocks.sysclk() > 2.MHz::<1, 1>() {
             return Err(nb::Error::Other(Error::SysclkTooHighLpr));
         }
