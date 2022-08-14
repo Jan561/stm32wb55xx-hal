@@ -7,6 +7,7 @@ use crate::pac::{FLASH, PWR, RCC};
 use crate::pwr::Pwr;
 use crate::pwr::Vos;
 use crate::time::Hertz;
+use core::convert::Infallible;
 use fugit::RateExtU32;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
 
@@ -1016,55 +1017,21 @@ pub(crate) fn set_flash_latency(hclk4: Hertz) {
 }
 
 pub trait TryClocks<'a> {
-    fn try_sysclk(&self) -> Option<Hertz>;
-    fn try_hclk1(&self) -> Option<Hertz>;
-    fn try_hclk2(&self) -> Option<Hertz>;
-    fn try_hclk4(&self) -> Option<Hertz>;
-    fn try_pclk1(&self) -> Option<Hertz>;
-    fn try_pclk2(&self) -> Option<Hertz>;
-    fn try_i2c1_clk(&self) -> Option<Hertz>;
-    fn try_i2c3_clk(&self) -> Option<Hertz>;
+    fn try_sysclk(&self) -> nb::Result<Hertz, Infallible>;
+    fn try_hclk1(&self) -> nb::Result<Hertz, Infallible>;
+    fn try_hclk2(&self) -> nb::Result<Hertz, Infallible>;
+    fn try_hclk4(&self) -> nb::Result<Hertz, Infallible>;
+    fn try_pclk1(&self) -> nb::Result<Hertz, Infallible>;
+    fn try_pclk2(&self) -> nb::Result<Hertz, Infallible>;
+    fn try_i2c1_clk(&self) -> nb::Result<Hertz, Infallible>;
+    fn try_i2c3_clk(&self) -> nb::Result<Hertz, Infallible>;
 }
 
 impl TryClocks<'static> for Rcc {
-    fn try_sysclk(&self) -> Option<Hertz> {
-        (&self).try_sysclk()
-    }
-
-    fn try_hclk1(&self) -> Option<Hertz> {
-        (&self).try_hclk1()
-    }
-
-    fn try_hclk2(&self) -> Option<Hertz> {
-        (&self).try_hclk2()
-    }
-
-    fn try_hclk4(&self) -> Option<Hertz> {
-        (&self).try_hclk4()
-    }
-
-    fn try_pclk1(&self) -> Option<Hertz> {
-        (&self).try_pclk1()
-    }
-
-    fn try_pclk2(&self) -> Option<Hertz> {
-        (&self).try_pclk2()
-    }
-
-    fn try_i2c1_clk(&self) -> Option<Hertz> {
-        (&self).try_i2c1_clk()
-    }
-
-    fn try_i2c3_clk(&self) -> Option<Hertz> {
-        (&self).try_i2c3_clk()
-    }
-}
-
-impl<'a> TryClocks<'a> for &'a Rcc {
-    fn try_sysclk(&self) -> Option<Hertz> {
+    fn try_sysclk(&self) -> nb::Result<Hertz, Infallible> {
         let cfgr = self.rcc.cfgr.read();
         if cfgr.sw().bits() != cfgr.sws().bits() {
-            return None;
+            return Err(nb::Error::WouldBlock);
         }
 
         let sysclk: SysclkSwitch = cfgr.sw().bits().try_into().unwrap();
@@ -1077,52 +1044,86 @@ impl<'a> TryClocks<'a> for &'a Rcc {
             SysclkSwitch::Pll => SysclkX::Pll,
         };
 
-        self.calculate_sysclk(sysclkx)
+        Ok(self.calculate_sysclk(sysclkx).unwrap())
     }
 
-    fn try_hclk1(&self) -> Option<Hertz> {
+    fn try_hclk1(&self) -> nb::Result<Hertz, Infallible> {
         let hpre = self.rcc.cfgr.read().hpre().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_hclk1(x, hpre))
     }
 
-    fn try_hclk2(&self) -> Option<Hertz> {
+    fn try_hclk2(&self) -> nb::Result<Hertz, Infallible> {
         let c2hpre = self.rcc.extcfgr.read().c2hpre().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_hclk2(x, c2hpre))
     }
 
-    fn try_hclk4(&self) -> Option<Hertz> {
+    fn try_hclk4(&self) -> nb::Result<Hertz, Infallible> {
         let shdpre = self.rcc.extcfgr.read().shdhpre().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_hclk4(x, shdpre))
     }
 
-    fn try_pclk1(&self) -> Option<Hertz> {
+    fn try_pclk1(&self) -> nb::Result<Hertz, Infallible> {
         let ppre1 = self.rcc.cfgr.read().ppre1().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_pclk1(x, ppre1))
     }
 
-    fn try_pclk2(&self) -> Option<Hertz> {
+    fn try_pclk2(&self) -> nb::Result<Hertz, Infallible> {
         let ppre2 = self.rcc.cfgr.read().ppre2().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_pclk2(x, ppre2))
     }
 
-    fn try_i2c1_clk(&self) -> Option<Hertz> {
+    fn try_i2c1_clk(&self) -> nb::Result<Hertz, Infallible> {
         let i2c_clk: I2cSel = self.rcc.ccipr.read().i2c1sel().bits().try_into().unwrap();
 
         match i2c_clk {
             I2cSel::Pclk => self.try_pclk1(),
             I2cSel::Sysclk => self.try_sysclk(),
-            I2cSel::Hsi16 => Some(hsi16_hertz()),
+            I2cSel::Hsi16 => Ok(hsi16_hertz()),
         }
     }
 
-    fn try_i2c3_clk(&self) -> Option<Hertz> {
+    fn try_i2c3_clk(&self) -> nb::Result<Hertz, Infallible> {
         let i2c_clk: I2cSel = self.rcc.ccipr.read().i2c3sel().bits().try_into().unwrap();
 
         match i2c_clk {
             I2cSel::Pclk => self.try_pclk1(),
             I2cSel::Sysclk => self.try_sysclk(),
-            I2cSel::Hsi16 => Some(hsi16_hertz()),
+            I2cSel::Hsi16 => Ok(hsi16_hertz()),
         }
+    }
+}
+
+impl<'a> TryClocks<'a> for &'a Rcc {
+    fn try_sysclk(&self) -> nb::Result<Hertz, Infallible> {
+        (*self).try_sysclk()
+    }
+
+    fn try_hclk1(&self) -> nb::Result<Hertz, Infallible> {
+        (*self).try_hclk1()
+    }
+
+    fn try_hclk2(&self) -> nb::Result<Hertz, Infallible> {
+        (*self).try_hclk2()
+    }
+
+    fn try_hclk4(&self) -> nb::Result<Hertz, Infallible> {
+        (*self).try_hclk4()
+    }
+
+    fn try_pclk1(&self) -> nb::Result<Hertz, Infallible> {
+        (*self).try_pclk1()
+    }
+
+    fn try_pclk2(&self) -> nb::Result<Hertz, Infallible> {
+        (*self).try_pclk2()
+    }
+
+    fn try_i2c1_clk(&self) -> nb::Result<Hertz, Infallible> {
+        (*self).try_i2c1_clk()
+    }
+
+    fn try_i2c3_clk(&self) -> nb::Result<Hertz, Infallible> {
+        (*self).try_i2c3_clk()
     }
 }
 
@@ -1141,36 +1142,36 @@ impl<'a, T> TryClocks<'a> for T
 where
     T: Clocks<'a>,
 {
-    fn try_sysclk(&self) -> Option<Hertz> {
-        Some(self.sysclk())
+    fn try_sysclk(&self) -> nb::Result<Hertz, Infallible> {
+        Ok(self.sysclk())
     }
 
-    fn try_hclk1(&self) -> Option<Hertz> {
-        Some(self.hclk1())
+    fn try_hclk1(&self) -> nb::Result<Hertz, Infallible> {
+        Ok(self.hclk1())
     }
 
-    fn try_hclk2(&self) -> Option<Hertz> {
-        Some(self.hclk2())
+    fn try_hclk2(&self) -> nb::Result<Hertz, Infallible> {
+        Ok(self.hclk2())
     }
 
-    fn try_hclk4(&self) -> Option<Hertz> {
-        Some(self.hclk4())
+    fn try_hclk4(&self) -> nb::Result<Hertz, Infallible> {
+        Ok(self.hclk4())
     }
 
-    fn try_pclk1(&self) -> Option<Hertz> {
-        Some(self.pclk1())
+    fn try_pclk1(&self) -> nb::Result<Hertz, Infallible> {
+        Ok(self.pclk1())
     }
 
-    fn try_pclk2(&self) -> Option<Hertz> {
-        Some(self.pclk2())
+    fn try_pclk2(&self) -> nb::Result<Hertz, Infallible> {
+        Ok(self.pclk2())
     }
 
-    fn try_i2c1_clk(&self) -> Option<Hertz> {
-        Some(self.i2c1_clk())
+    fn try_i2c1_clk(&self) -> nb::Result<Hertz, Infallible> {
+        Ok(self.i2c1_clk())
     }
 
-    fn try_i2c3_clk(&self) -> Option<Hertz> {
-        Some(self.i2c3_clk())
+    fn try_i2c3_clk(&self) -> nb::Result<Hertz, Infallible> {
+        Ok(self.i2c3_clk())
     }
 }
 
@@ -1250,6 +1251,83 @@ impl Clocks<'static> for &'_ Ccdr {
 
     fn i2c3_clk(&self) -> Hertz {
         (*self).i2c3_clk()
+    }
+}
+
+pub struct Unwrap<T>(pub T);
+
+impl<'a, T> Clocks<'a> for Unwrap<T>
+where
+    T: TryClocks<'a>,
+{
+    fn sysclk(&self) -> Hertz {
+        self.try_hclk1().unwrap()
+    }
+
+    fn hclk1(&self) -> Hertz {
+        self.try_hclk1().unwrap()
+    }
+
+    fn hclk2(&self) -> Hertz {
+        self.try_hclk2().unwrap()
+    }
+
+    fn hclk4(&self) -> Hertz {
+        self.try_hclk4().unwrap()
+    }
+
+    fn pclk1(&self) -> Hertz {
+        self.try_pclk1().unwrap()
+    }
+
+    fn pclk2(&self) -> Hertz {
+        self.try_pclk2().unwrap()
+    }
+
+    fn i2c1_clk(&self) -> Hertz {
+        self.try_i2c1_clk().unwrap()
+    }
+
+    fn i2c3_clk(&self) -> Hertz {
+        self.try_i2c3_clk().unwrap()
+    }
+}
+
+pub struct Block<T>(pub T);
+
+impl<'a, T> Clocks<'a> for Block<T>
+where
+    T: TryClocks<'a>,
+{
+    fn sysclk(&self) -> Hertz {
+        nb::block!(self.try_sysclk()).unwrap()
+    }
+
+    fn hclk1(&self) -> Hertz {
+        nb::block!(self.try_hclk1()).unwrap()
+    }
+
+    fn hclk2(&self) -> Hertz {
+        nb::block!(self.try_hclk2()).unwrap()
+    }
+
+    fn hclk4(&self) -> Hertz {
+        nb::block!(self.try_hclk4()).unwrap()
+    }
+
+    fn pclk1(&self) -> Hertz {
+        nb::block!(self.try_pclk1()).unwrap()
+    }
+
+    fn pclk2(&self) -> Hertz {
+        nb::block!(self.try_pclk2()).unwrap()
+    }
+    fn i2c1_clk(&self) -> Hertz {
+        nb::block!(self.try_i2c1_clk()).unwrap()
+    }
+
+    fn i2c3_clk(&self) -> Hertz {
+        nb::block!(self.try_i2c3_clk()).unwrap()
     }
 }
 
