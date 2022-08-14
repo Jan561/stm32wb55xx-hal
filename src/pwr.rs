@@ -46,7 +46,7 @@
 
 use crate::pac::pwr::{sr1, sr2};
 use crate::pac::PWR;
-use crate::rcc::{self, Clocks};
+use crate::rcc::{self, TryClocks};
 use cortex_m::peripheral::SCB;
 use fugit::RateExtU32;
 use num_enum::{FromPrimitive, IntoPrimitive, TryFromPrimitive};
@@ -77,16 +77,21 @@ impl Pwr {
     pub fn set_power_range<'a>(
         &mut self,
         range: Vos,
-        clocks: impl Clocks<'a>,
-    ) -> Result<(), Error> {
-        if range == Vos::Range2 && clocks.sysclk() > 2.MHz::<1, 1>() {
-            return Err(Error::SysclkTooHighVos);
+        clocks: impl TryClocks<'a>,
+    ) -> nb::Result<(), Error> {
+        let sysclk = match clocks.try_sysclk() {
+            Some(x) => x,
+            None => return Err(nb::Error::WouldBlock),
+        };
+
+        if range == Vos::Range2 && sysclk > 2.MHz::<1, 1>() {
+            return Err(nb::Error::Other(Error::SysclkTooHighVos));
         }
 
         let old_vos: Vos = self.pwr.cr1.read().vos().bits().try_into().unwrap();
 
         if old_vos == Vos::Range1 && range == Vos::Range2 {
-            rcc::set_flash_latency(clocks.hclk4());
+            rcc::set_flash_latency(clocks.try_hclk4().unwrap());
         }
 
         self.pwr.cr1.modify(|_, w| w.vos().variant(range.into()));
@@ -109,9 +114,14 @@ impl Pwr {
     ///
     /// After calling the function, the clock speed must not be increased
     /// above 2 MHz.
-    pub fn enter_low_power_run<'a>(&mut self, clocks: impl Clocks<'a>) -> Result<(), Error> {
-        if clocks.sysclk() > 2.MHz::<1, 1>() {
-            return Err(Error::SysclkTooHighLpr);
+    pub fn enter_low_power_run<'a>(&mut self, clocks: impl TryClocks<'a>) -> nb::Result<(), Error> {
+        let sysclk = match clocks.try_sysclk() {
+            Some(x) => x,
+            None => return Err(nb::Error::WouldBlock),
+        };
+
+        if sysclk > 2.MHz::<1, 1>() {
+            return Err(nb::Error::Other(Error::SysclkTooHighLpr));
         }
 
         let cr1 = &c1_c2!(self.pwr.cr1, self.pwr.c2cr1);

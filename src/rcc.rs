@@ -182,6 +182,10 @@ impl Rcc {
             return Err(Error::LseDisabled);
         }
 
+        if !en && self.is_pllclk(PllSrc::Msi) {
+            return Err(Error::ClockInUse);
+        }
+
         self.rcc.cr.modify(|_, w| w.msipllen().bit(en));
 
         Ok(())
@@ -257,6 +261,8 @@ impl Rcc {
             )?;
         }
 
+        self.rcc.cr.modify(|_, w| w.pllon().bit(en));
+
         Ok(())
     }
 
@@ -274,6 +280,10 @@ impl Rcc {
             let pllsrcx = match pllsrc {
                 PllSrc::NoClock => unreachable!(),
                 PllSrc::Msi => {
+                    if self.rcc.cr.read().msipllen().bit_is_clear() {
+                        return Err(Error::MsiPllDisabled);
+                    }
+
                     PllSrcX::Msi(self.rcc.cr.read().msirange().bits().try_into().unwrap())
                 }
                 PllSrc::Hsi16 => PllSrcX::Hsi16,
@@ -293,6 +303,8 @@ impl Rcc {
                 pllsai1cfgr.pllr().bits().try_into().unwrap(),
             )?;
         }
+
+        self.rcc.cr.modify(|_, w| w.pllsai1on().bit(en));
 
         Ok(())
     }
@@ -1003,55 +1015,57 @@ pub(crate) fn set_flash_latency(hclk4: Hertz) {
     });
 }
 
-pub trait Clocks<'a> {
-    fn sysclk(&self) -> Hertz;
-    fn hclk1(&self) -> Hertz;
-    fn hclk2(&self) -> Hertz;
-    fn hclk4(&self) -> Hertz;
-    fn pclk1(&self) -> Hertz;
-    fn pclk2(&self) -> Hertz;
-    fn i2c1_clk(&self) -> Hertz;
-    fn i2c3_clk(&self) -> Hertz;
+pub trait TryClocks<'a> {
+    fn try_sysclk(&self) -> Option<Hertz>;
+    fn try_hclk1(&self) -> Option<Hertz>;
+    fn try_hclk2(&self) -> Option<Hertz>;
+    fn try_hclk4(&self) -> Option<Hertz>;
+    fn try_pclk1(&self) -> Option<Hertz>;
+    fn try_pclk2(&self) -> Option<Hertz>;
+    fn try_i2c1_clk(&self) -> Option<Hertz>;
+    fn try_i2c3_clk(&self) -> Option<Hertz>;
 }
 
-impl Clocks<'static> for Rcc {
-    fn sysclk(&self) -> Hertz {
-        (&self).sysclk()
+impl TryClocks<'static> for Rcc {
+    fn try_sysclk(&self) -> Option<Hertz> {
+        (&self).try_sysclk()
     }
 
-    fn hclk1(&self) -> Hertz {
-        (&self).hclk1()
+    fn try_hclk1(&self) -> Option<Hertz> {
+        (&self).try_hclk1()
     }
 
-    fn hclk2(&self) -> Hertz {
-        (&self).hclk2()
+    fn try_hclk2(&self) -> Option<Hertz> {
+        (&self).try_hclk2()
     }
 
-    fn hclk4(&self) -> Hertz {
-        (&self).hclk4()
+    fn try_hclk4(&self) -> Option<Hertz> {
+        (&self).try_hclk4()
     }
 
-    fn pclk1(&self) -> Hertz {
-        (&self).pclk1()
+    fn try_pclk1(&self) -> Option<Hertz> {
+        (&self).try_pclk1()
     }
 
-    fn pclk2(&self) -> Hertz {
-        (&self).pclk2()
+    fn try_pclk2(&self) -> Option<Hertz> {
+        (&self).try_pclk2()
     }
 
-    fn i2c1_clk(&self) -> Hertz {
-        (&self).i2c1_clk()
+    fn try_i2c1_clk(&self) -> Option<Hertz> {
+        (&self).try_i2c1_clk()
     }
 
-    fn i2c3_clk(&self) -> Hertz {
-        (&self).i2c3_clk()
+    fn try_i2c3_clk(&self) -> Option<Hertz> {
+        (&self).try_i2c3_clk()
     }
 }
 
-impl<'a> Clocks<'a> for &'a Rcc {
-    fn sysclk(&self) -> Hertz {
+impl<'a> TryClocks<'a> for &'a Rcc {
+    fn try_sysclk(&self) -> Option<Hertz> {
         let cfgr = self.rcc.cfgr.read();
-        assert_eq!(cfgr.sw().bits(), cfgr.sws().bits());
+        if cfgr.sw().bits() != cfgr.sws().bits() {
+            return None;
+        }
 
         let sysclk: SysclkSwitch = cfgr.sw().bits().try_into().unwrap();
         let sysclkx = match sysclk {
@@ -1063,52 +1077,100 @@ impl<'a> Clocks<'a> for &'a Rcc {
             SysclkSwitch::Pll => SysclkX::Pll,
         };
 
-        self.calculate_sysclk(sysclkx).unwrap()
+        self.calculate_sysclk(sysclkx)
     }
 
-    fn hclk1(&self) -> Hertz {
+    fn try_hclk1(&self) -> Option<Hertz> {
         let hpre = self.rcc.cfgr.read().hpre().bits().try_into().unwrap();
-        self.calculate_hclk1(self.sysclk(), hpre)
+        self.try_sysclk().map(|x| self.calculate_hclk1(x, hpre))
     }
 
-    fn hclk2(&self) -> Hertz {
+    fn try_hclk2(&self) -> Option<Hertz> {
         let c2hpre = self.rcc.extcfgr.read().c2hpre().bits().try_into().unwrap();
-        self.calculate_hclk2(self.sysclk(), c2hpre)
+        self.try_sysclk().map(|x| self.calculate_hclk2(x, c2hpre))
     }
 
-    fn hclk4(&self) -> Hertz {
+    fn try_hclk4(&self) -> Option<Hertz> {
         let shdpre = self.rcc.extcfgr.read().shdhpre().bits().try_into().unwrap();
-        self.calculate_hclk4(self.sysclk(), shdpre)
+        self.try_sysclk().map(|x| self.calculate_hclk4(x, shdpre))
     }
 
-    fn pclk1(&self) -> Hertz {
+    fn try_pclk1(&self) -> Option<Hertz> {
         let ppre1 = self.rcc.cfgr.read().ppre1().bits().try_into().unwrap();
-        self.calculate_pclk1(self.hclk1(), ppre1)
+        self.try_sysclk().map(|x| self.calculate_pclk1(x, ppre1))
     }
 
-    fn pclk2(&self) -> Hertz {
+    fn try_pclk2(&self) -> Option<Hertz> {
         let ppre2 = self.rcc.cfgr.read().ppre2().bits().try_into().unwrap();
-        self.calculate_pclk2(self.hclk1(), ppre2)
+        self.try_sysclk().map(|x| self.calculate_pclk2(x, ppre2))
     }
 
-    fn i2c1_clk(&self) -> Hertz {
+    fn try_i2c1_clk(&self) -> Option<Hertz> {
         let i2c_clk: I2cSel = self.rcc.ccipr.read().i2c1sel().bits().try_into().unwrap();
 
         match i2c_clk {
-            I2cSel::Pclk => self.pclk1(),
-            I2cSel::Sysclk => self.sysclk(),
-            I2cSel::Hsi16 => hsi16_hertz(),
+            I2cSel::Pclk => self.try_pclk1(),
+            I2cSel::Sysclk => self.try_sysclk(),
+            I2cSel::Hsi16 => Some(hsi16_hertz()),
         }
     }
 
-    fn i2c3_clk(&self) -> Hertz {
+    fn try_i2c3_clk(&self) -> Option<Hertz> {
         let i2c_clk: I2cSel = self.rcc.ccipr.read().i2c3sel().bits().try_into().unwrap();
 
         match i2c_clk {
-            I2cSel::Pclk => self.pclk1(),
-            I2cSel::Sysclk => self.sysclk(),
-            I2cSel::Hsi16 => hsi16_hertz(),
+            I2cSel::Pclk => self.try_pclk1(),
+            I2cSel::Sysclk => self.try_sysclk(),
+            I2cSel::Hsi16 => Some(hsi16_hertz()),
         }
+    }
+}
+
+pub trait Clocks<'a> {
+    fn sysclk(&self) -> Hertz;
+    fn hclk1(&self) -> Hertz;
+    fn hclk2(&self) -> Hertz;
+    fn hclk4(&self) -> Hertz;
+    fn pclk1(&self) -> Hertz;
+    fn pclk2(&self) -> Hertz;
+    fn i2c1_clk(&self) -> Hertz;
+    fn i2c3_clk(&self) -> Hertz;
+}
+
+impl<'a, T> TryClocks<'a> for T
+where
+    T: Clocks<'a>,
+{
+    fn try_sysclk(&self) -> Option<Hertz> {
+        Some(self.sysclk())
+    }
+
+    fn try_hclk1(&self) -> Option<Hertz> {
+        Some(self.hclk1())
+    }
+
+    fn try_hclk2(&self) -> Option<Hertz> {
+        Some(self.hclk2())
+    }
+
+    fn try_hclk4(&self) -> Option<Hertz> {
+        Some(self.hclk4())
+    }
+
+    fn try_pclk1(&self) -> Option<Hertz> {
+        Some(self.pclk1())
+    }
+
+    fn try_pclk2(&self) -> Option<Hertz> {
+        Some(self.pclk2())
+    }
+
+    fn try_i2c1_clk(&self) -> Option<Hertz> {
+        Some(self.i2c1_clk())
+    }
+
+    fn try_i2c3_clk(&self) -> Option<Hertz> {
+        Some(self.i2c3_clk())
     }
 }
 
@@ -1190,6 +1252,13 @@ impl Clocks<'static> for &'_ Ccdr {
         (*self).i2c3_clk()
     }
 }
+
+pub unsafe trait TrustedClocks<'a> {}
+
+unsafe impl TrustedClocks<'static> for Ccdr {}
+unsafe impl TrustedClocks<'static> for &'_ Ccdr {}
+unsafe impl TrustedClocks<'static> for Rcc {}
+unsafe impl<'a> TrustedClocks<'a> for &'a Rcc {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopwuck {
