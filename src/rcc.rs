@@ -89,12 +89,12 @@ impl Rcc {
         Ok(())
     }
 
-    pub fn msi_range(&mut self, range: MsiRange) -> Result<(), Error> {
+    pub fn msi_range(&mut self, range: MsiRange) -> nb::Result<(), Error> {
         let cr = self.rcc.cr.read();
         let pllcfgr = self.rcc.pllcfgr.read();
 
         if cr.msion().bit() && !cr.msirdy().bit() {
-            return Err(Error::MsiNotReady);
+            return Err(nb::Error::WouldBlock);
         }
 
         let is_sysclk = self.is_sysclk(SysclkSwitch::Msi);
@@ -108,6 +108,13 @@ impl Rcc {
         if is_sysclk {
             let cfgr = self.rcc.cfgr.read();
             let extcfgr = self.rcc.extcfgr.read();
+
+            if cfgr.hpref().bit_is_clear()
+                || extcfgr.c2hpref().bit_is_clear()
+                || extcfgr.shdhpref().bit_is_clear()
+            {
+                return Err(nb::Error::WouldBlock);
+            }
 
             self.check_sysclk(
                 range.hertz(),
@@ -222,11 +229,11 @@ impl Rcc {
         self.rcc.cr.modify(|_, w| w.hsepre().bit(div_by_2));
     }
 
-    pub fn pll_enabled(&mut self, _: &Pwr, en: bool) -> Result<(), Error> {
+    pub fn pll_enabled(&mut self, _: &Pwr, en: bool) -> nb::Result<(), Error> {
         let pllcfgr = self.rcc.pllcfgr.read();
 
         if !en && self.is_sysclk(SysclkSwitch::Pll) {
-            return Err(Error::ClockInUse);
+            return Err(nb::Error::Other(Error::ClockInUse));
         }
 
         if en {
@@ -241,7 +248,7 @@ impl Rcc {
                 PllSrc::NoClock => unreachable!(),
                 PllSrc::Msi => {
                     if self.rcc.cr.read().msipllen().bit_is_clear() {
-                        return Err(Error::MsiPllDisabled);
+                        return Err(nb::Error::Other(Error::MsiPllDisabled));
                     }
 
                     PllSrcX::Msi(self.rcc.cr.read().msirange().bits().try_into().unwrap())
@@ -267,7 +274,7 @@ impl Rcc {
         Ok(())
     }
 
-    pub fn pllsai1_enabled(&mut self, _: &Pwr, en: bool) -> Result<(), Error> {
+    pub fn pllsai1_enabled(&mut self, _: &Pwr, en: bool) -> nb::Result<(), Error> {
         let pllcfgr = self.rcc.pllcfgr.read();
 
         if en {
@@ -282,7 +289,7 @@ impl Rcc {
                 PllSrc::NoClock => unreachable!(),
                 PllSrc::Msi => {
                     if self.rcc.cr.read().msipllen().bit_is_clear() {
-                        return Err(Error::MsiPllDisabled);
+                        return Err(nb::Error::Other(Error::MsiPllDisabled));
                     }
 
                     PllSrcX::Msi(self.rcc.cr.read().msirange().bits().try_into().unwrap())
@@ -310,8 +317,12 @@ impl Rcc {
         Ok(())
     }
 
-    pub fn sysclk(&mut self, _: &Pwr, sw: SysclkSwitch) -> Result<(), Error> {
+    pub fn sysclk(&mut self, _: &Pwr, sw: SysclkSwitch) -> nb::Result<(), Error> {
         let cr = self.rcc.cr.read();
+        let cfgr = self.rcc.cfgr.read();
+        let extcfgr = self.rcc.extcfgr.read();
+
+        self.check_sysclk_blocked()?;
 
         let sysclk = |sysclk| {
             let sysclkx = match sysclk {
@@ -322,16 +333,13 @@ impl Rcc {
             };
 
             self.calculate_sysclk(sysclkx)
-                .ok_or(Error::SelectedClockNotEnabled)
+                .ok_or(nb::Error::Other(Error::SelectedClockNotEnabled))
         };
 
         let new_sysclk = sysclk(sw)?;
 
         let pwr = unsafe { &*PWR::PTR };
         let vos: Vos = pwr.cr1.read().vos().bits().try_into().unwrap();
-
-        let cfgr = self.rcc.cfgr.read();
-        let extcfgr = self.rcc.extcfgr.read();
 
         self.check_sysclk_rdy(sw)?;
         self.check_sysclk(
@@ -366,9 +374,11 @@ impl Rcc {
         Ok(())
     }
 
-    pub fn hclk1_prescaler(&mut self, _: &Pwr, scale: PreScaler) -> Result<(), Error> {
+    pub fn hclk1_prescaler(&mut self, _: &Pwr, scale: PreScaler) -> nb::Result<(), Error> {
         let cr = self.rcc.cr.read();
         let cfgr = self.rcc.cfgr.read();
+
+        self.check_sysclk_blocked()?;
 
         let sw: SysclkSwitch = cfgr.sw().bits().try_into().unwrap();
         let sysclkx = match sw {
@@ -398,9 +408,11 @@ impl Rcc {
         Ok(())
     }
 
-    pub fn hclk2_prescaler(&mut self, _: &Pwr, scale: PreScaler) -> Result<(), Error> {
+    pub fn hclk2_prescaler(&mut self, _: &Pwr, scale: PreScaler) -> nb::Result<(), Error> {
         let cr = self.rcc.cr.read();
         let cfgr = self.rcc.cfgr.read();
+
+        self.check_sysclk_blocked()?;
 
         let sw: SysclkSwitch = cfgr.sw().bits().try_into().unwrap();
         let sysclkx = match sw {
@@ -432,9 +444,11 @@ impl Rcc {
         Ok(())
     }
 
-    pub fn hclk4_prescaler(&mut self, _: &Pwr, scale: PreScaler) -> Result<(), Error> {
+    pub fn hclk4_prescaler(&mut self, _: &Pwr, scale: PreScaler) -> nb::Result<(), Error> {
         let cr = self.rcc.cr.read();
         let cfgr = self.rcc.cfgr.read();
+
+        self.check_sysclk_blocked()?;
 
         let sw: SysclkSwitch = cfgr.sw().bits().try_into().unwrap();
         let sysclkx = match sw {
@@ -750,6 +764,24 @@ impl Rcc {
         });
     }
 
+    fn check_sysclk_blocked(&self) -> nb::Result<(), Error> {
+        if self.sysclk_blocked() {
+            Err(nb::Error::WouldBlock)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn sysclk_blocked(&self) -> bool {
+        let cfgr = self.rcc.cfgr.read();
+        let ext = self.rcc.extcfgr.read();
+
+        cfgr.sw().bits() != cfgr.sws().bits()
+            || cfgr.hpref().bit_is_clear()
+            || ext.c2hpref().bit_is_clear()
+            || ext.shdhpref().bit_is_clear()
+    }
+
     fn pll_m_checked(src: PllSrcX, vos: Vos, pllm: Pllm) -> Result<VcoHertz, Error> {
         let pll_m_in = match src {
             PllSrcX::Msi(r) => r.hertz(),
@@ -955,11 +987,11 @@ impl Rcc {
         (cr.pllon().bit() || cr.pllsai1on().bit()) && pllcfgr.pllsrc().bits() == clk.into()
     }
 
-    fn check_sysclk_rdy(&self, sysclk: SysclkSwitch) -> Result<(), Error> {
+    fn check_sysclk_rdy(&self, sysclk: SysclkSwitch) -> nb::Result<(), Error> {
         if self.sysclk_is_rdy(sysclk) {
             Ok(())
         } else {
-            Err(Error::SelectedClockNotEnabled)
+            Err(nb::Error::WouldBlock)
         }
     }
 
@@ -974,22 +1006,26 @@ impl Rcc {
         }
     }
 
-    fn check_pllclk_rdy(&self, clk: PllSrc) -> Result<(), Error> {
-        if self.pllclk_is_rdy(clk) {
-            Ok(())
-        } else {
-            Err(Error::SelectedClockNotEnabled)
-        }
+    fn check_pllclk_rdy(&self, clk: PllSrc) -> nb::Result<(), Error> {
+        self.pllclk_is_rdy(clk)
+            .ok_or(nb::Error::Other(Error::PllNoClockSelected))
+            .and_then(|ready| {
+                if ready {
+                    Ok(())
+                } else {
+                    Err(nb::Error::WouldBlock)
+                }
+            })
     }
 
-    fn pllclk_is_rdy(&self, clk: PllSrc) -> bool {
+    fn pllclk_is_rdy(&self, clk: PllSrc) -> Option<bool> {
         let cr = self.rcc.cr.read();
 
         match clk {
-            PllSrc::NoClock => false,
-            PllSrc::Msi => cr.msirdy().bit(),
-            PllSrc::Hsi16 => cr.hsirdy().bit() || cr.hsikerdy().bit(),
-            PllSrc::Hse => cr.hserdy().bit(),
+            PllSrc::NoClock => None,
+            PllSrc::Msi => Some(cr.msirdy().bit()),
+            PllSrc::Hsi16 => Some(cr.hsirdy().bit() || cr.hsikerdy().bit()),
+            PllSrc::Hse => Some(cr.hserdy().bit()),
         }
     }
 
@@ -1048,26 +1084,46 @@ impl TryClocks<'static> for Rcc {
     }
 
     fn try_hclk1(&self) -> nb::Result<Hertz, Infallible> {
+        if self.rcc.cfgr.read().hpref().bit_is_clear() {
+            return Err(nb::Error::WouldBlock);
+        }
+
         let hpre = self.rcc.cfgr.read().hpre().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_hclk1(x, hpre))
     }
 
     fn try_hclk2(&self) -> nb::Result<Hertz, Infallible> {
+        if self.rcc.extcfgr.read().c2hpref().bit_is_clear() {
+            return Err(nb::Error::WouldBlock);
+        }
+
         let c2hpre = self.rcc.extcfgr.read().c2hpre().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_hclk2(x, c2hpre))
     }
 
     fn try_hclk4(&self) -> nb::Result<Hertz, Infallible> {
+        if self.rcc.extcfgr.read().shdhpref().bit_is_clear() {
+            return Err(nb::Error::WouldBlock);
+        }
+
         let shdpre = self.rcc.extcfgr.read().shdhpre().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_hclk4(x, shdpre))
     }
 
     fn try_pclk1(&self) -> nb::Result<Hertz, Infallible> {
+        if self.rcc.cfgr.read().ppre1f().bit_is_clear() {
+            return Err(nb::Error::WouldBlock);
+        }
+
         let ppre1 = self.rcc.cfgr.read().ppre1().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_pclk1(x, ppre1))
     }
 
     fn try_pclk2(&self) -> nb::Result<Hertz, Infallible> {
+        if self.rcc.cfgr.read().ppre2f().bit_is_clear() {
+            return Err(nb::Error::WouldBlock);
+        }
+
         let ppre2 = self.rcc.cfgr.read().ppre2().bits().try_into().unwrap();
         self.try_sysclk().map(|x| self.calculate_pclk2(x, ppre2))
     }
