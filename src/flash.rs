@@ -103,7 +103,6 @@ pub struct Flash {
     flash: FLASH,
 }
 
-#[allow(clippy::len_without_is_empty)]
 impl Flash {
     pub fn new(flash: FLASH) -> Self {
         Self { flash }
@@ -189,7 +188,7 @@ impl Flash {
         acr.modify(|_, w| w.pes().bit(suspend));
     }
 
-    pub fn empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.flash.acr.read().empty().bit()
     }
 
