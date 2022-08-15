@@ -65,6 +65,11 @@ impl embedded_hal::i2c::Error for Error {
     }
 }
 
+#[derive(Debug)]
+pub enum ConfigError {
+    I2cClockDisabled,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     Transmit,
@@ -82,7 +87,7 @@ pub trait I2cExt: Sized {
         pins: PINS,
         clocks: impl Clocks + TrustedClocks<'a>,
         frequency: Hertz,
-    ) -> I2c<'a, Self, PINS>
+    ) -> Result<I2c<'a, Self, PINS>, ConfigError>
     where
         PINS: Pins<Self>;
 }
@@ -247,7 +252,7 @@ macro_rules! i2c {
         paste! {
             $(
                 impl<'a, PINS> I2c<'a, $I2Cx, PINS> {
-                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz) -> Self
+                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz) -> Result<Self, ConfigError>
                     where
                         PINS: Pins<$I2Cx>,
                     {
@@ -262,7 +267,12 @@ macro_rules! i2c {
                         rec::$I2Cx::enable();
                         rec::$I2Cx::reset();
 
-                        let [presc, scll, sclh, sdadel, scldel] = Self::timings(clocks.[<$I2Cx:lower _clk>](), frequency);
+                        let i2cclk = match clocks.[<$I2Cx:lower _clk>]() {
+                            Some(x) => x,
+                            None => return Err(ConfigError::I2cClockDisabled),
+                        };
+
+                        let [presc, scll, sclh, sdadel, scldel] = Self::timings(i2cclk, frequency);
 
                         i2c.timingr.modify(|_, w| {
                             w.presc()
@@ -281,11 +291,11 @@ macro_rules! i2c {
                             w.anfoff().clear_bit().pe().set_bit()
                         });
 
-                        Self {
+                        Ok(Self {
                             _phantom: PhantomData,
                             i2c,
                             pins,
-                        }
+                        })
                     }
 
                     pub fn listen(&mut self, event: Event) {
@@ -723,7 +733,7 @@ macro_rules! i2c {
                 hal! { TenBitAddress, TenBit }
 
                 impl I2cExt for $I2Cx {
-                    fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz) -> I2c<'a, $I2Cx, PINS>
+                    fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz) -> Result<I2c<'a, $I2Cx, PINS>, ConfigError>
                     where
                         PINS: Pins<$I2Cx>,
                     {
