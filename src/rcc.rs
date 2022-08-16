@@ -713,8 +713,9 @@ impl Rcc {
             .modify(|_, w| w.sai1sel().variant(clock.into()));
     }
 
+    /// Note: This doesn't check if speed of selected clock is indeed 48 MHz. Initialization
+    /// of peripherals requiring this exact speed will fail if that requirement isn't fulfilled
     pub fn clock_48(&mut self, clock: Clk48Sel) {
-        // TODO: PLL check necessary??
         self.rcc
             .ccipr
             .modify(|_, w| w.clk48sel().variant(clock.into()));

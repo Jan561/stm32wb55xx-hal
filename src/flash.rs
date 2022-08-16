@@ -116,10 +116,43 @@ impl Flash {
         FlashSize::get().bytes()
     }
 
-    pub fn unlock(&mut self) -> UnlockedFlash {
-        unlock(&self.flash);
+    /// Unlocks the Flash and returns a handle to the unlocked flash
+    /// 
+    /// The Flash is locked automatically after dropping the handle
+    pub fn unlocked(&mut self) -> UnlockedFlash {
+        if self.flash.cr.read().lock().bit_is_set() {
+            unlock(&self.flash);
+        }
 
-        UnlockedFlash { flash: self }
+        UnlockedFlash { flash: self, autolock: true }
+    }
+
+    /// Unlocks the Flash
+    /// 
+    /// Note: The caller is responsible for locking the flash manually afterwards
+    pub fn unlock(&mut self) {
+        unlock(&self.flash);
+    }
+
+    /// Returns a handle to the unlocked flash
+    /// 
+    /// The caller must ensure that the flash is indeed unlocked.
+    /// The Flash is **not** locked automatically after dropping the handle
+    /// 
+    /// # Panic
+    /// 
+    /// Panics if the flash is locked
+    pub fn as_unlocked(&mut self) -> UnlockedFlash {
+        assert!(self.flash.cr.read().lock().bit_is_clear());
+
+        UnlockedFlash { flash: self, autolock: false }
+    }
+
+    /// Locks the flash
+    /// 
+    /// Not necessary to call if the flash got unlocked with `unlocked`
+    pub fn lock(&mut self) {
+        lock(&self.flash);
     }
 
     pub fn page(&self, offset: usize) -> Option<u8> {
@@ -199,11 +232,14 @@ impl Flash {
 
 pub struct UnlockedFlash<'a> {
     flash: &'a mut Flash,
+    autolock: bool,
 }
 
 impl Drop for UnlockedFlash<'_> {
     fn drop(&mut self) {
-        lock(&self.flash.flash);
+        if self.autolock {
+            lock(&self.flash.flash);
+        }
     }
 }
 
