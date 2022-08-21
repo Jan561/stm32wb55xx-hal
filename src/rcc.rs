@@ -42,7 +42,10 @@ pub trait RccExt {
 
 impl RccExt for RCC {
     fn constrain(self) -> Rcc {
-        Rcc { rcc: self }
+        Rcc {
+            rcc: self,
+            rec: rec::Rec::new(),
+        }
     }
 }
 
@@ -77,6 +80,7 @@ pub enum Event {
 }
 
 pub struct Rcc {
+    pub rec: rec::Rec,
     rcc: RCC,
 }
 

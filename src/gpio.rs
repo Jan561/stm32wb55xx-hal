@@ -112,8 +112,9 @@ pub trait PinExt {
 
 pub trait GpioExt {
     type Parts;
+    type REC;
 
-    fn split(self) -> Self::Parts;
+    fn split(self, rec: &mut Self::REC) -> Self::Parts;
 }
 
 pub struct Pin<const P: char, const N: u8, MODE = Analog> {
@@ -404,10 +405,11 @@ macro_rules! gpio {
 
                 impl super::GpioExt for $GPIOX {
                     type Parts = Parts;
+                    type REC = rec::$GPIOX;
 
-                    fn split(self) -> Parts {
-                        rec::$GPIOX::enable();
-                        rec::$GPIOX::reset();
+                    fn split(self, rec: &mut Self::REC) -> Parts {
+                        rec.enable();
+                        rec.reset();
 
                         Parts {
                             $(

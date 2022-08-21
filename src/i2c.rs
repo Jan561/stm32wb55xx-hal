@@ -82,11 +82,14 @@ pub enum Event {
 }
 
 pub trait I2cExt: Sized {
+    type REC;
+
     fn i2c<'a, PINS>(
         self,
         pins: PINS,
         clocks: impl Clocks + TrustedClocks<'a>,
         frequency: Hertz,
+        rec: &mut Self::REC,
     ) -> Result<I2c<'a, Self, PINS>, ConfigError>
     where
         PINS: Pins<Self>;
@@ -252,7 +255,7 @@ macro_rules! i2c {
         paste! {
             $(
                 impl<'a, PINS> I2c<'a, $I2Cx, PINS> {
-                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz) -> Result<Self, ConfigError>
+                    pub fn new(i2c: $I2Cx, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz, rec: &mut rec::$I2Cx) -> Result<Self, ConfigError>
                     where
                         PINS: Pins<$I2Cx>,
                     {
@@ -264,8 +267,8 @@ macro_rules! i2c {
                             panic!("PCLK1 frequency must be at least 3/4 of SCL frequency");
                         }
 
-                        rec::$I2Cx::enable();
-                        rec::$I2Cx::reset();
+                        rec.enable();
+                        rec.reset();
 
                         let i2cclk = match clocks.[<$I2Cx:lower _clk>]() {
                             Some(x) => x,
@@ -733,11 +736,13 @@ macro_rules! i2c {
                 hal! { TenBitAddress, TenBit }
 
                 impl I2cExt for $I2Cx {
-                    fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz) -> Result<I2c<'a, $I2Cx, PINS>, ConfigError>
+                    type REC = rec::$I2Cx;
+
+                    fn i2c<'a, PINS>(self, pins: PINS, clocks: impl Clocks + TrustedClocks<'a>, frequency: Hertz, rec: &mut rec::$I2Cx) -> Result<I2c<'a, $I2Cx, PINS>, ConfigError>
                     where
                         PINS: Pins<$I2Cx>,
                     {
-                        I2c::<$I2Cx, _>::new(self, pins, clocks, frequency)
+                        I2c::<$I2Cx, _>::new(self, pins, clocks, frequency, rec)
                     }
                 }
             )*

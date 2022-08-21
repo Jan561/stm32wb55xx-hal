@@ -12,7 +12,7 @@ macro_rules! bus {
         paste! {
             $(
                 $(#[$meta])?
-                pub struct $bus {
+                struct $bus {
                     _marker: PhantomData<*const ()>,
                 }
 
@@ -100,16 +100,25 @@ bus! {
     APB3SHARED => [R APB3RSTR]
 }
 
+macro_rules! p_struct {
+    ($name:ident) => {
+        #[allow(clippy::upper_case_acronyms)]
+        pub struct $name {
+            _marker: PhantomData<*const ()>,
+        }
+    };
+}
+
 macro_rules! enable {
     ($p:ident => ($AXBn:ident, $f:ident)) => {
         #[allow(unused)]
         impl $p {
-            pub fn enable() {
+            pub fn enable(&mut self) {
                 let r = $AXBn::enr();
                 r.modify(|_, w| w.$f().set_bit());
             }
 
-            pub fn disable() {
+            pub fn disable(&mut self) {
                 let r = $AXBn::enr();
                 r.modify(|_, w| w.$f().clear_bit());
             }
@@ -121,12 +130,12 @@ macro_rules! sm_enable {
     ($p:ident => ($AXBn:ident, $f:ident)) => {
         #[allow(unused)]
         impl $p {
-            pub fn sm_enable() {
+            pub fn sm_enable(&mut self) {
                 let r = $AXBn::smenr();
                 r.modify(|_, w| w.$f().set_bit());
             }
 
-            pub fn sm_disable() {
+            pub fn sm_disable(&mut self) {
                 let r = $AXBn::smenr();
                 r.modify(|_, w| w.$f().clear_bit());
             }
@@ -138,7 +147,7 @@ macro_rules! reset {
     ($p:ident => ($AXBn:ident, $f:ident)) => {
         #[allow(unused)]
         impl $p {
-            pub fn reset() {
+            pub fn reset(&mut self) {
                 let r = $AXBn::rst();
                 r.modify(|_, w| w.$f().set_bit());
                 r.modify(|_, w| w.$f().clear_bit());
@@ -151,9 +160,8 @@ macro_rules! rec {
     ($($(#[$meta:meta])? $p:ident => $AXBn:ident),* $(,)?) => {
         paste! {
             $(
-                #[allow(clippy::upper_case_acronyms)]
                 $(#[$meta])?
-                pub struct $p;
+                p_struct!($p);
 
                 $(#[$meta])?
                 enable!($p => ($AXBn, [<$p:lower en>]));
@@ -212,79 +220,136 @@ rec! {
     // BLE => APB3,
 }
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct DMAMUX1;
+p_struct!(DMAMUX1);
+
 enable!(DMAMUX1 => (AHB1, dmamuxen));
 sm_enable!(DMAMUX1 => (AHB1, dmamuxsmen));
 reset!(DMAMUX1 => (AHB1, dmamuxrst));
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct SRAM1;
+p_struct!(SRAM1);
 sm_enable!(SRAM1 => (AHB1, sram1smen));
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct ADC;
+p_struct!(ADC);
 enable!(ADC => (AHB2, adcen));
 sm_enable!(ADC => (AHB2, adcfssmen));
 reset!(ADC => (AHB2, adcrst));
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct SRAM2;
+p_struct!(SRAM2);
 sm_enable!(SRAM2 => (AHB3, sram2smen));
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct HSEM;
+p_struct!(HSEM);
 enable!(HSEM => (AHB3, hsemen));
 reset!(HSEM => (AHB3, hsemrst));
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct IPCC;
+p_struct!(IPCC);
 enable!(IPCC => (AHB3, ipccen));
 reset!(IPCC => (AHB3, ipccrst));
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct RTCAPB;
+p_struct!(RTCAPB);
 enable!(RTCAPB => (APB1_1, rtcapben));
 sm_enable!(RTCAPB => (APB1_1, rtcapbsmen));
 
 #[cfg(feature = "cm4")]
-#[allow(clippy::upper_case_acronyms)]
-pub struct WWDG;
+p_struct!(WWDG);
 #[cfg(feature = "cm4")]
 enable!(WWDG => (APB1_1, wwdgen));
 #[cfg(feature = "cm4")]
 sm_enable!(WWDG => (APB1_1, wwdgsmen));
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct CRS;
+p_struct!(CRS);
 enable!(CRS => (APB1_1, crsen));
 sm_enable!(CRS => (APB1_1, crsmen));
 reset!(CRS => (APB1_1, crsrst));
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct USB;
+p_struct!(USB);
 enable!(USB => (APB1_1, usben));
 sm_enable!(USB => (APB1_1, usbsmen));
 reset!(USB => (APB1_1, usbfsrst));
 
 #[cfg(feature = "cm0p")]
-#[allow(clippy::upper_case_acronyms)]
-pub struct BLE;
+p_struct!(BLE);
 #[cfg(feature = "cm0p")]
 enable!(BLE => (APB3, bleen));
 #[cfg(feature = "cm0p")]
 sm_enable!(BLE => (APB3, blesmen));
 
 #[cfg(feature = "cm0p")]
-pub struct _802;
+p_struct!(_802);
 #[cfg(feature = "cm0p")]
 enable!(_802 => (APB3, en802));
 #[cfg(feature = "cm0p")]
 sm_enable!(_802 => (APB3, smen802));
 
-#[allow(clippy::upper_case_acronyms)]
-pub struct RF;
+p_struct!(RF);
 #[cfg(feature = "cm4")]
 reset!(RF => (APB3, rfrst));
 #[cfg(feature = "cm0p")]
 reset!(RF => (APB3SHARED, rfrst));
+
+macro_rules! rec_struct {
+    ($($(#[$meta:meta])? $field:ident,)*) => {
+        paste! {
+            pub struct Rec {
+                $(
+                    $(#[$meta])?
+                    pub [<$field:lower>]: $field,
+                )*
+            }
+
+            impl Rec {
+                pub(super) const fn new() -> Self {
+                    Self {
+                        $(
+                            $(#[$meta])?
+                            [<$field:lower>]: $field { _marker: PhantomData },
+                        )*
+                    }
+                }
+            }
+        }
+    };
+}
+
+rec_struct! {
+    DMA1,
+    DMA2,
+    DMAMUX1,
+    SRAM1,
+    CRC,
+    TSC,
+    GPIOA,
+    GPIOB,
+    GPIOC,
+    GPIOD,
+    GPIOE,
+    GPIOH,
+    ADC,
+    AES1,
+    #[cfg(feature = "cm4")]
+    QSPI,
+    PKA,
+    AES2,
+    RNG,
+    HSEM,
+    IPCC,
+    FLASH,
+    TIM2,
+    LCD,
+    SPI2,
+    I2C1,
+    I2C3,
+    CRS,
+    USB,
+    LPTIM1,
+    LPUART1,
+    LPTIM2,
+    TIM1,
+    SPI1,
+    USART1,
+    TIM16,
+    TIM17,
+    SAI1,
+    RF,
+    #[cfg(feature = "cm0p")]
+    BLE,
+}
