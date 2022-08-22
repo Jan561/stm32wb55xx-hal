@@ -2,17 +2,19 @@ pub mod acl;
 pub mod ble;
 pub mod channel;
 pub mod cmd;
+pub mod consts;
 pub mod evt;
 pub mod mm;
 pub mod unsafe_linked_list;
 
-use aligned::{Aligned, A4};
-
 use self::acl::AclDataPacket;
 use self::ble::Ble;
+use self::evt::EvtBox;
 use self::mm::MemoryManager;
 use self::{cmd::CmdPacket, unsafe_linked_list::ListNode};
 use crate::{ipcc::Ipcc, rcc::rec};
+use aligned::{Aligned, A4};
+use consts::{TL_CS_EVT_SIZE, TL_EVT_HDR_SIZE, TL_PACKET_HEADER_SIZE};
 use core::mem::MaybeUninit;
 
 // From STM32_WPAN/interface/patterns/ble_thread/tl/mbox_def.h
@@ -169,14 +171,10 @@ static mut TRACES_EVT_QUEUE: Aligned<A4, MaybeUninit<ListNode>> = Aligned(MaybeU
 
 type PacketHeader = ListNode;
 
-const TL_PACKET_HEADER_SIZE: usize = core::mem::size_of::<PacketHeader>();
-const TL_EVT_HEADER_SIZE: usize = 3;
-const TL_CS_EVT_SIZE: usize = 0; // TODO
-
 #[link_section = "MB_MEM2"]
 static mut CS_BUFFER: Aligned<
     A4,
-    MaybeUninit<[u8; TL_PACKET_HEADER_SIZE + TL_EVT_HEADER_SIZE + TL_CS_EVT_SIZE]>,
+    MaybeUninit<[u8; TL_PACKET_HEADER_SIZE + TL_EVT_HDR_SIZE + TL_CS_EVT_SIZE]>,
 > = Aligned(MaybeUninit::uninit());
 
 #[link_section = "MB_MEM1"]
@@ -190,7 +188,7 @@ static mut LOCAL_FREE_BUF_QUEUE: MaybeUninit<ListNode> = MaybeUninit::uninit();
 
 const CFG_TLBLE_EVT_QUEUE_LENGTH: usize = 5;
 const CFG_TLBLE_MOST_EVENT_PAYLOAD_SIZE: usize = 255;
-const TL_BLE_EVENT_FRAME_SIZE: usize = TL_EVT_HEADER_SIZE + CFG_TLBLE_MOST_EVENT_PAYLOAD_SIZE;
+const TL_BLE_EVENT_FRAME_SIZE: usize = TL_EVT_HDR_SIZE + CFG_TLBLE_MOST_EVENT_PAYLOAD_SIZE;
 
 const fn divc(x: usize, y: usize) -> usize {
     (x + y - 1) / y
@@ -208,13 +206,13 @@ static mut SYS_CMD_BUFFER: Aligned<A4, MaybeUninit<CmdPacket>> = Aligned(MaybeUn
 #[link_section = "MB_MEM2"]
 static mut SYS_SPARE_EVT_BUF: Aligned<
     A4,
-    MaybeUninit<[u8; TL_PACKET_HEADER_SIZE + TL_EVT_HEADER_SIZE + 255]>,
+    MaybeUninit<[u8; TL_PACKET_HEADER_SIZE + TL_EVT_HDR_SIZE + 255]>,
 > = Aligned(MaybeUninit::uninit());
 
 #[link_section = "MB_MEM2"]
 static mut BLE_SPARE_EVT_BUF: Aligned<
     A4,
-    MaybeUninit<[u8; TL_PACKET_HEADER_SIZE + TL_EVT_HEADER_SIZE + 255]>,
+    MaybeUninit<[u8; TL_PACKET_HEADER_SIZE + TL_EVT_HDR_SIZE + 255]>,
 > = Aligned(MaybeUninit::uninit());
 
 #[link_section = "MB_MEM2"]
@@ -224,6 +222,8 @@ static mut BLE_CMD_BUFFER: Aligned<A4, MaybeUninit<CmdPacket>> = Aligned(MaybeUn
 // Some magic numbers of ST ---------------------------------------------------------v----v
 static mut HCI_ACL_DATA_BUFFER: Aligned<A4, MaybeUninit<[u8; TL_PACKET_HEADER_SIZE + 5 + 251]>> =
     Aligned(MaybeUninit::uninit());
+
+pub type HeaplessEvtQueue = heapless::spsc::Queue<EvtBox, 32>;
 
 pub struct TlMbox {
     ble: Ble,

@@ -1,4 +1,5 @@
 use crate::ipcc::Ipcc;
+use core::marker::PhantomData;
 
 use super::{
     channel::c1::IPCC_MM_RELEASE_BUFFER_CHANNEL,
@@ -11,7 +12,9 @@ use core::mem::MaybeUninit;
 
 use aligned::Aligned;
 
-pub struct MemoryManager;
+pub struct MemoryManager {
+    _marker: PhantomData<*const ()>,
+}
 
 impl MemoryManager {
     pub(super) fn new() -> Self {
@@ -30,7 +33,9 @@ impl MemoryManager {
             }));
         }
 
-        Self
+        Self {
+            _marker: PhantomData,
+        }
     }
 }
 

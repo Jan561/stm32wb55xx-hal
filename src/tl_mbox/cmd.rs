@@ -9,12 +9,12 @@ pub struct Cmd {
 
 #[repr(C, packed)]
 pub struct CmdSerial {
-    kind: u8,
-    cmd: Cmd,
+    pub kind: u8,
+    pub cmd: Cmd,
 }
 
 #[repr(C, packed)]
 pub struct CmdPacket {
-    header: PacketHeader,
-    cmdserial: CmdSerial,
+    pub header: PacketHeader,
+    pub cmdserial: CmdSerial,
 }

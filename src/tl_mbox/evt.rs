@@ -54,6 +54,10 @@ impl EvtPacket {
 pub struct EvtBox(*mut EvtPacket);
 
 impl EvtBox {
+    pub(super) fn new(packet: *mut EvtPacket) -> Self {
+        Self(packet)
+    }
+
     pub fn evt(&self) -> EvtPacket {
         let mut evt = MaybeUninit::uninit();
         unsafe {

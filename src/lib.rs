@@ -1,4 +1,4 @@
-#![cfg_attr(not(test), no_std)]
+#![no_std]
 #![feature(never_type)]
 #![feature(associated_const_equality)]
 

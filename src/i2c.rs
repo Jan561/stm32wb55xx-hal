@@ -793,7 +793,7 @@ pins! {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(test)))]
 mod test {
     use super::I2c;
     use fugit::RateExtU32;
